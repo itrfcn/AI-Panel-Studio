@@ -2,7 +2,7 @@
 Expert Agent — 单个专家的抢答决策与发言。
 
 PRD §5.2 专家状态机：待机 → 准备 → 发言中 → 待机（循环）。
-PRD §5.3 抢答仲裁：举手 priority ∈ {rebute, supplement, grab}，仲裁优先级 rebute > supplement > grab。
+PRD §5.3 抢答仲裁：举手 priority ∈ {rebute, supplement, grab}，仲裁优先级 grab > supplement > rebute（提出→补充→反驳）。
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ class ExpertAgent:
       2. speak(ctx, priority) → AsyncIterator[str] 流式发言
     """
 
-    # 仲裁优先级权重（数值越大越优先发言）
-    PRIORITY_WEIGHT = {"rebute": 3, "supplement": 2, "grab": 1}
+    # 仲裁优先级权重（数值越大越先发言）—提出→补充→反驳
+    PRIORITY_WEIGHT = {"grab": 3, "supplement": 2, "rebute": 1}
 
     def __init__(
         self,
@@ -108,5 +108,5 @@ class ExpertAgent:
             context_text=ctx.as_text(),
             priority=priority,
         )
-        async for delta in client.chat_stream(messages, temperature=0.7, max_tokens=384):
+        async for delta in client.chat_stream(messages, temperature=0.7, max_tokens=256):
             yield delta

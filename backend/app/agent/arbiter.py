@@ -2,7 +2,7 @@
 Arbiter — 主持人仲裁多专家举手信号。
 
 PRD §5.3：仲裁规则
-  - 优先级：rebute > supplement > grab
+  - 优先级：grab > supplement > rebute（提出→补充→反驳）
   - 同级按举手时间戳 FIFO（asyncio.gather 返回顺序近似时间戳）
 
 仲裁过程不调 LLM（规则化决策），但需将 hand_raise/grab_arbitration/grab_result
@@ -115,7 +115,7 @@ class Arbiter:
                     }
                     for s in signals
                 ],
-                "rule": "rebute > supplement > grab; FIFO within same priority",
+                "rule": "grab > supplement > rebute; FIFO within same priority",
             },
         )
         for w in winners:
@@ -132,5 +132,5 @@ class Arbiter:
         return winners
 
 
-# 优先级权重表（数值越大越优先）—与 ExpertAgent.PRIORITY_WEIGHT 保持一致
-ExpertAgentPriority = {"rebute": 3, "supplement": 2, "grab": 1}
+# 优先级权重表（数值越大越先发言）—提出→补充→反驳
+ExpertAgentPriority = {"grab": 3, "supplement": 2, "rebute": 1}

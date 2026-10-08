@@ -285,6 +285,8 @@ async def _run_expert_round(
     max_turns: int,
     next_turn_index_val: int,
     pending_extracts: list[asyncio.Task] | None = None,
+    mod_agent: ModeratorAgent | None = None,
+    moderator: _PseudoGuest | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """跑一轮专家抢答发言。
 
@@ -335,8 +337,8 @@ async def _run_expert_round(
         if sig is not None:
             signals.append(sig)
 
-    # 把所有专家的 thought 通过 state 事件广播（preparing 态）
-    # 胜者后续切 speaking，败者切回 idle
+    # 把所有举手专家的 thought 通过 state 事件广播（hand_raised 态）
+    # 用户可见"谁举手了"，仲裁后败者回 idle，胜者依次 speaking
     sig_by_guest_id = {s.guest_id: s for s in signals}
     for agent in agents:
         sig = sig_by_guest_id.get(agent.guest_id)
@@ -346,7 +348,7 @@ async def _run_expert_round(
                 agent.guest_id,
                 agent.name,
                 agent.color,
-                "preparing",
+                "hand_raised",
                 thought=sig.thought,
             )
         else:
@@ -453,6 +455,30 @@ async def _run_expert_round(
 
         current_turn = _next_turn_index(topic_id)
 
+    # 3.5 主持人串联/追问（看完本轮发言后引导下一轮方向）
+    if mod_agent is not None and moderator is not None:
+        yield make_state_event(
+            topic_id, moderator.id, moderator.name, moderator.color, "speaking"
+        )
+        followup_turn = _next_turn_index(topic_id)
+        followup_id = _create_transcript_row(
+            topic_id, moderator.id, followup_turn, "followup"
+        )
+        with SessionLocal() as db:
+            interject_ctx = build_context(db, topic_id, topic.title)
+        async for ev in _stream_speech(
+            topic_id=topic_id,
+            transcript_id=followup_id,
+            guest=moderator,
+            turn_index=followup_turn,
+            speech_type="followup",
+            agent_method=lambda ma=mod_agent, ic=interject_ctx: ma.interject(ic),
+        ):
+            yield ev
+        yield make_state_event(
+            topic_id, moderator.id, moderator.name, moderator.color, "idle"
+        )
+
     # 4. 触发抽取（T1+）— 后台并发，不阻塞下一轮决策
     # 计算已有发言条数（不含开场？包含？按 PRD §6.3：T1=第1位专家发言完成）
     with SessionLocal() as db:
@@ -535,6 +561,8 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
             max_turns=max_turns,
             next_turn_index_val=next_turn_val,
             pending_extracts=pending_extracts,
+            mod_agent=mod_agent,
+            moderator=moderator,
         ):
             yield ev
 

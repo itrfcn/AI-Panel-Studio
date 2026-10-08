@@ -10,9 +10,10 @@ const props = defineProps({
 })
 
 const stateMeta = {
-  idle: { label: '待机', dot: 'bg-gray-400', ring: 'ring-gray-600' },
-  preparing: { label: '准备中', dot: 'bg-yellow-400 animate-pulse', ring: 'ring-yellow-500/60' },
-  speaking: { label: '发言中', dot: 'bg-green-400 animate-pulse', ring: 'ring-green-400/80' },
+  idle: { label: '待机', dot: 'bg-gray-400', ring: 'ring-gray-600', icon: '' },
+  hand_raised: { label: '举手', dot: 'bg-blue-400 animate-pulse', ring: 'ring-blue-500/60', icon: '✋' },
+  preparing: { label: '准备中', dot: 'bg-yellow-400 animate-pulse', ring: 'ring-yellow-500/60', icon: '' },
+  speaking: { label: '发言中', dot: 'bg-green-400 animate-pulse', ring: 'ring-green-400/80', icon: '🎤' },
 }
 
 const meta = computed(() => stateMeta[props.state] || stateMeta.idle)
@@ -24,7 +25,7 @@ const isModerator = computed(() => props.guest.role === 'moderator')
     class="rounded-lg border bg-studio-panel p-3 transition"
     :class="[
       isModerator ? 'border-studio-accent' : 'border-studio-border',
-      state === 'speaking' ? `ring-2 ${meta.ring}` : '',
+      state === 'speaking' || state === 'hand_raised' ? `ring-2 ${meta.ring}` : '',
     ]"
     :style="{ boxShadow: state === 'speaking' ? `0 0 0 1px ${guest.color}` : undefined }"
   >
@@ -46,6 +47,7 @@ const isModerator = computed(() => props.guest.role === 'moderator')
         <p class="text-xs text-gray-400 truncate">{{ guest.title }}</p>
       </div>
       <div class="flex items-center gap-1.5 shrink-0">
+        <span v-if="meta.icon" class="text-sm">{{ meta.icon }}</span>
         <span class="w-2 h-2 rounded-full" :class="meta.dot"></span>
         <span class="text-xs text-gray-300">{{ meta.label }}</span>
       </div>
@@ -57,8 +59,9 @@ const isModerator = computed(() => props.guest.role === 'moderator')
     >立场：{{ guest.stance }}</p>
 
     <div
-      v-if="state === 'preparing' && thought"
-      class="mt-2 text-xs text-yellow-200/80 bg-yellow-900/20 rounded px-2 py-1 line-clamp-2"
+      v-if="(state === 'preparing' || state === 'hand_raised') && thought"
+      class="mt-2 text-xs rounded px-2 py-1 line-clamp-2"
+      :class="state === 'hand_raised' ? 'text-blue-200/80 bg-blue-900/20' : 'text-yellow-200/80 bg-yellow-900/20'"
     >
       💭 {{ thought }}
     </div>

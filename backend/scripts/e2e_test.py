@@ -383,10 +383,12 @@ async def run_flow() -> None:
         check("首条为 opening", speech_types and speech_types[0] == "opening",
               str(speech_types))
         check("末条为 summary", speech_types and speech_types[-1] == "summary")
-        expert_speeches = speech_types[1:-1]
+        expert_speeches = [s for s in speech_types[1:-1] if s in ("grab", "supplement", "rebute")]
         check("中间有专家发言", len(expert_speeches) >= 1, str(expert_speeches))
         expert_types_ok = all(s in ("grab", "supplement", "rebute") for s in expert_speeches)
         check("专家发言类型合法", expert_types_ok, str(expert_speeches))
+        followup_count = speech_types[1:-1].count("followup")
+        check("主持人串联存在", followup_count >= 1, f"followup×{followup_count}")
 
         # done 的 content 应非空且与 delta 累积一致
         for t in stream["transcripts_done"]:
@@ -431,7 +433,7 @@ async def run_flow() -> None:
         check("topic.ended_at 已写入", bool(t and t.ended_at))
 
         dbt = db_data["transcripts"]
-        check(f"DB transcript 共 {1 + len(expert_speeches) + 1} 条",
+        check(f"DB transcript 共 {len(speech_types)} 条",
               len(dbt) == len(stream["transcripts_done"]),
               f"DB={len(dbt)} SSE={len(stream['transcripts_done'])}")
         all_done = all(x.status == "done" for x in dbt)

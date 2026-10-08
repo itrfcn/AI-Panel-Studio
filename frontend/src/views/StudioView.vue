@@ -28,14 +28,10 @@ function resetGuestStates(state = 'idle') {
   }
 }
 
-function setSpeaking(guestId) {
-  // 当前发言者 speaking，其余 expert idle（主持人保留原状态）
-  for (const g of topic.value?.guests || []) {
-    if (g.id === guestId) {
-      guestStates[g.id] = { state: 'speaking', thought: '' }
-    } else if (g.role === 'expert') {
-      guestStates[g.id] = { state: 'idle', thought: '' }
-    }
+function setGuestState(guestId, state, thought = '') {
+  // 忠实反映后端 state 事件，不做额外推断
+  if (guestStates[guestId]) {
+    guestStates[guestId] = { state, thought }
   }
 }
 
@@ -107,9 +103,10 @@ function startStream() {
   unsubscribe = subscribeStream(props.id, {
     onTranscript: (t) => {
       upsertTranscript(t)
-      if (t.status === 'streaming' || t.status === 'done') {
-        setSpeaking(t.guest_id)
-      }
+    },
+    onState: (s) => {
+      // 后端推送的嘉宾状态：idle / hand_raised / preparing / speaking
+      setGuestState(s.guest_id, s.state, s.thought || '')
     },
     onInsight: (ins) => {
       // 进行中增量：create/update/finalize 先按 insight_id upsert；

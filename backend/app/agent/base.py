@@ -35,9 +35,15 @@ class AgentContext:
         lines: list[str] = []
         for t in self.transcripts:
             g = self.guests_by_id.get(t.guest_id)
-            speaker = g.name if g else f"guest#{t.guest_id}"
-            role_label = "主持人" if (g and g.role == "moderator") else "专家"
-            lines.append(f"[{role_label}]{speaker}：{t.content}")
+            if g is None:
+                lines.append(f"[guest#{t.guest_id}]：{t.content}")
+                continue
+            if g.role == "moderator":
+                lines.append(f"[主持人]{g.name}：{t.content}")
+            else:
+                # 标注专家立场，便于其他专家识别该反驳谁
+                stance = f"（{g.stance}）" if g.stance else ""
+                lines.append(f"[专家]{g.name}{stance}：{t.content}")
         return "\n".join(lines)
 
 

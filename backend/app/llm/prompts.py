@@ -30,15 +30,18 @@ def roster_prompt(topic_title: str, expert_count: int) -> list[dict[str, str]]:
     system = (
         "你是一名资深圆桌讨论策划人。根据用户给出的话题，"
         f"组建一个由 1 位主持人 + {expert_count} 位专家组成的讨论阵容。\n\n"
-        "专家席位要求：\n"
-        "- 立场应多样化，覆盖话题不同侧面（支持/反对/中立/技术/伦理等）\n"
-        "- 颜色需区分明显，使用 #RRGGBB 格式\n"
-        "- 每位专家有独立 title 与简短 stance（≤30 字）\n\n"
+        "专家席位要求（核心：每位专家必须是独立思考的个体，立场鲜明对立）：\n"
+        f"- {expert_count} 位专家必须覆盖话题的不同乃至对立立场（支持/反对/中立/技术派/伦理派等），\n"
+        "  确保讨论中会产生真实的观点碰撞与反驳\n"
+        "- 每位专家有独特的专业背景（title），且该背景直接决定其 stance\n"
+        "- stance 必须具体、有倾向性（≤30 字），避免模糊的「视情况而定」类表述\n"
+        "- 每位专家的 profile 应描述其思维倾向与论证风格（如「数据驱动」「人文关怀」「技术乐观」）\n"
+        "- 颜色需区分明显，使用 #RRGGBB 格式\n\n"
         "严格输出 JSON 对象，格式如下（不要 markdown、不要解释）：\n"
         "{\n"
         '  "roster": [\n'
         '    {"role":"moderator","name":"主持人姓名","title":"主持人职业","stance":null,"color":"#RRGGBB","profile":"资深主持人，擅长..."},\n'
-        '    {"role":"expert","name":"专家姓名","title":"专家职业","stance":"该专家立场摘要","color":"#RRGGBB","profile":"背景与观点倾向..."}\n'
+        '    {"role":"expert","name":"专家姓名","title":"专家职业","stance":"该专家明确立场摘要","color":"#RRGGBB","profile":"背景与观点倾向..."}\n'
         "  ]\n"
         "}\n"
         "roster 数组长度必须 = 1 + expert_count，第 0 位固定为 moderator。"
@@ -108,20 +111,21 @@ def raise_hand_prompt(
 
     返回 JSON：{will_raise: bool, priority: "grab"|"supplement"|"rebute",
               thought: "≤30 字思考摘要"}
-    priority 含义（仲裁优先级）：
-      - rebute   反驳他人观点（最高优先级）
-      - supplement 补充信息或例子（中）
-      - grab     抢答新角度（最低）
+    priority 含义（仲裁发言顺序，数值越大越先发言）：
+      - grab     抢答新角度（最先发言，提出新观点）
+      - supplement 补充信息或例子（中间发言，补充前面）
+      - rebute   反驳他人观点（最后发言，反驳前面）
     """
     system = (
-        f"你是圆桌讨论专家 {expert_name}（{expert_title}），立场倾向：{expert_stance}。"
+        f"你是圆桌讨论专家 {expert_name}（{expert_title}），你的独立立场：{expert_stance}。"
         f"讨论话题：{topic_title}。\n"
-        f"当前第 {turn_number}/{max_turns} 轮。\n"
-        "根据已有发言，决策本轮是否举手发言：\n"
-        "- 若有人观点与你立场冲突，且你有具体反驳论据 → priority=rebute\n"
-        "- 若发言需要补充例子/数据/视角 → priority=supplement\n"
-        "- 若想引入全新方向/抢答 → priority=grab\n"
-        "- 若无可说或已多次发言 → will_raise=false\n"
+        f"当前第 {turn_number}/{max_turns} 轮。\n\n"
+        "你是一个独立思考的个体，有自己的判断和坚持。根据已有发言，决策本轮是否举手发言：\n"
+        "- 若有人观点与你立场冲突，即使对方是多数派，你也应坚持己见举手反驳 → priority=rebute\n"
+        "- 若你有独特的例子/数据/视角尚未被提及 → priority=supplement\n"
+        "- 若你想从全新角度切入讨论 → priority=grab\n"
+        "- 只有当你完全无话可说且与所有发言都一致时，才 will_raise=false\n"
+        "记住：独立思考意味着不人云亦云，敢于表达不同意见。\n"
         "严格输出 JSON（不带 markdown）：\n"
         '{"will_raise": true|false, "priority": "grab|supplement|rebute", "thought": "≤30字思考"}\n'
         "will_raise=false 时 priority 可填 grab。"
@@ -157,13 +161,16 @@ def expert_speak_prompt(
         "grab": "本轮请引入新的角度或论点，开拓讨论面",
     }.get(priority, "自然发言")
     system = (
-        f"你是圆桌讨论的专家 {expert_name}（{expert_title}），立场倾向：{expert_stance}。"
+        f"你是圆桌讨论的专家 {expert_name}（{expert_title}），你的独立立场：{expert_stance}。"
         f"讨论话题：{topic_title}。\n"
         f"{priority_hint}。\n"
-        "请基于上下文发表 1 段发言（约 100-180 字），要求：\n"
-        "- 紧扣话题、保持立场一致性\n"
+        "请基于上下文发表 1-2 句话（不超过 80 字），要求：\n"
+        "- 坚守你的独立立场，不被他人观点带偏\n"
+        "- 若有人观点与你冲突，直接点名反驳，给出你的论据\n"
         "- 提供具体论点或例子，不空话\n"
         "- 不带 markdown、emoji，自然口语化\n"
+        "- 每次发言控制在 1-2 句话，简短有力\n"
+        "- 你是独立的思考者，不是附和者\n"
     )
     user = f"已有发言：\n{context_text}\n\n请发言。"
     return [
@@ -173,13 +180,17 @@ def expert_speak_prompt(
 
 
 def followup_prompt(topic_title: str, context_text: str) -> list[dict[str, str]]:
-    """主持人追问。MVP 不调用，阶段 4 用。"""
+    """主持人串联/追问。每轮专家发言后调用，引导下一轮讨论方向。"""
     system = (
-        "你是圆桌讨论的主持人，根据当前发言决定是否追问或切换话题。"
+        "你是圆桌讨论的主持人。根据本轮专家发言，输出简短的串联或追问（1-2 句话，不超过 60 字）。"
         f"讨论话题：{topic_title}。\n"
-        "输出一段简短追问或过渡语（50-100 字），不带 markdown/emoji。"
+        "可以：\n"
+        "- 追问某位专家的观点细节\n"
+        "- 指出专家间的分歧，引导下一轮辩论\n"
+        "- 简短过渡，引出新的讨论方向\n"
+        "不带 markdown/emoji，自然口语化。"
     )
-    user = f"已有发言：\n{context_text}\n\n请输出追问或过渡。"
+    user = f"已有发言：\n{context_text}\n\n请输出串联或追问。"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
