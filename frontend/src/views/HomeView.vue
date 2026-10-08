@@ -1,0 +1,71 @@
+<script setup>
+// 首页 — 讨论列表 + 发起新讨论
+// PRD §4.1：展示当前所有正在进行的讨论列表
+import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import TopicList from '../components/TopicList.vue'
+import { listTopics } from '../api/topics'
+
+const router = useRouter()
+const topics = ref([])
+const loading = ref(false)
+
+async function load() {
+  loading.value = true
+  try {
+    const res = await listTopics()
+    topics.value = res.items || []
+  } finally {
+    loading.value = false
+  }
+}
+
+function onSelect(t) {
+  router.push(`/studio/${t.id}`)
+}
+
+onMounted(load)
+</script>
+
+<template>
+  <div class="h-full flex">
+    <!-- 左侧：讨论列表（独立滚动） -->
+    <div class="w-full max-w-2xl mx-auto lg:mx-0 lg:w-96 shrink-0 border-r border-studio-border h-full">
+      <TopicList :topics="topics" :loading="loading" @select="onSelect" @new="router.push('/setup')" />
+    </div>
+
+    <!-- 右侧：欢迎/说明区（独立滚动） -->
+    <div class="flex-1 min-w-0 overflow-y-auto p-8">
+      <div class="max-w-2xl">
+        <h1 class="text-3xl font-semibold mb-3">AI 圆桌演播厅</h1>
+        <p class="text-gray-400 leading-relaxed">
+          召集一支虚拟智库，围绕任意议题展开深度碰撞。主持人负责开场、追问与收尾，
+          专家自主"举手"抢答与反驳，过程中实时生成共识与分歧。
+        </p>
+
+        <div class="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="rounded-lg border border-studio-border bg-studio-panel p-4">
+            <div class="text-sm text-blue-300 mb-1">多 Agent 协作</div>
+            <p class="text-xs text-gray-400">主持人与 N 位专家分阶段分上下文对话，避免幻觉</p>
+          </div>
+          <div class="rounded-lg border border-studio-border bg-studio-panel p-4">
+            <div class="text-sm text-green-300 mb-1">过程可见</div>
+            <p class="text-xs text-gray-400">chain-of-thought 实时生成，不等到结束才出现</p>
+          </div>
+          <div class="rounded-lg border border-studio-border bg-studio-panel p-4">
+            <div class="text-sm text-orange-300 mb-1">沉浸感</div>
+            <p class="text-xs text-gray-400">嘉宾小窗状态切换 + 流式发言，像在看一场直播</p>
+          </div>
+          <div class="rounded-lg border border-studio-border bg-studio-panel p-4">
+            <div class="text-sm text-purple-300 mb-1">可回放</div>
+            <p class="text-xs text-gray-400">archived 讨论可完整回放发言与共识分歧</p>
+          </div>
+        </div>
+
+        <p class="mt-8 text-sm text-gray-500">
+          👈 从左侧选择一场讨论加入观察，或点击「发起新讨论」开始。
+        </p>
+      </div>
+    </div>
+  </div>
+</template>
