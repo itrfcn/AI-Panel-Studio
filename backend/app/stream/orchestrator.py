@@ -1,19 +1,22 @@
 """
-Orchestrator — MVP 主循环 async generator。
+Orchestrator — 主循环 async generator。
 
-PRD §3.3 多 Agent 调度。MVP 阶段只跑主持人单轮：
-  1. system(discussion started)
+PRD §3.3 多 Agent 调度。
+完整循环（阶段 4-5 解锁后）：
+  1. system(discussion started, phase=opening)
   2. state(moderator idle→preparing→speaking)
-  3. transcript(opening, streaming→done)
+  3. transcript(opening, streaming→done)  ← 主持人开场
   4. state(moderator speaking→idle)
-  5. topic.status: ongoing → summarizing
+  5. [循环 MAX_TURNS 次] 每轮：
+     a. 各专家并发 decide_raise_hand（asyncio.gather 加速）
+     b. Arbiter 仲裁 → 胜者发言（state 变化 + transcript streaming→done）
+     c. 触发 ExtractorAgent 增量抽取（T1+，T0 跳过）→ SSE insight 事件
   6. state(moderator idle→preparing→speaking)
-  7. transcript(summary, streaming→done)
+  7. transcript(summary, streaming→done)  ← 主持人收尾
   8. state(moderator speaking→idle)
-  9. topic.status: summarizing → archived；topic.summary 落库
- 10. end(summary)
-
-阶段 4 加入专家抢答循环后再扩展（agent/expert.py + agent/arbiter.py）。
+  9. ExtractorAgent.finalize → SSE insight finalize 事件
+ 10. topic.status: ongoing → summarizing → archived；topic.summary 落库
+ 11. end(summary)
 
 跨 yield 不持有 session：每个 DB 写入块内独立 SessionLocal()，commit 后立即 close。
 客户端断开时 try/finally 把 in-flight transcript 状态置 aborted。
@@ -27,7 +30,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 
-from app.agent import ModeratorAgent, build_context
+from app.agent import (
+    Arbiter,
+    ExpertAgent,
+    ExtractorAgent,
+    ModeratorAgent,
+    build_context,
+)
+from app.config import settings
 from app.database import SessionLocal
 from app.models import Guest, Topic, Transcript
 from app.stream.events import (
@@ -38,11 +48,25 @@ from app.stream.events import (
 )
 
 
+# ---------------------------------------------------------------------------
+# DB helpers（跨 yield 安全，每块独立 session）
+# ---------------------------------------------------------------------------
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_setup(topic_id: int) -> tuple[Topic, Guest, int]:
+class _PseudoGuest:
+    """fallback：DB 中找不到 Guest 时的占位对象（仅含 SSE 事件所需字段）。"""
+
+    def __init__(self, *, id: int, name: str, color: str) -> None:
+        self.id = id
+        self.name = name
+        self.color = color
+
+
+def _load_topic_moderator(topic_id: int) -> tuple[Topic, Guest, int]:
     """加载 topic + 主持人 + 已有最大 turn_index。"""
     with SessionLocal() as db:
         topic = db.get(Topic, topic_id)
@@ -68,12 +92,37 @@ def _load_setup(topic_id: int) -> tuple[Topic, Guest, int]:
         max_turn = db.scalar(
             select(func.max(Transcript.turn_index)).where(Transcript.topic_id == topic_id)
         )
-        next_turn = (max_turn or -1) + 1
+        next_turn = (max_turn if max_turn is not None else -1) + 1
 
-        # detach for use outside session
         db.expunge(topic)
         db.expunge(moderator)
         return topic, moderator, next_turn
+
+
+def _load_experts(topic_id: int) -> list[Guest]:
+    """加载所有专家（按 sort_order 升序）。"""
+    with SessionLocal() as db:
+        rows = (
+            db.execute(
+                select(Guest)
+                .where(Guest.topic_id == topic_id, Guest.role == "expert")
+                .order_by(Guest.sort_order)
+            )
+            .scalars()
+            .all()
+        )
+        for r in rows:
+            db.expunge(r)
+        return list(rows)
+
+
+def _next_turn_index(topic_id: int) -> int:
+    """取下一个可用 turn_index（max+1，注意 0 是合法值不能 or）。"""
+    with SessionLocal() as db:
+        max_turn = db.scalar(
+            select(func.max(Transcript.turn_index)).where(Transcript.topic_id == topic_id)
+        )
+        return (max_turn if max_turn is not None else -1) + 1
 
 
 def _create_transcript_row(
@@ -96,8 +145,7 @@ def _create_transcript_row(
         db.add(t)
         db.commit()
         db.refresh(t)
-        transcript_id = t.id
-        return transcript_id
+        return t.id
 
 
 def _finalize_transcript_row(
@@ -114,7 +162,6 @@ def _finalize_transcript_row(
         t.content = content
         t.status = status
         t.completed_at = _now_iso()
-        # reason 不存表（schema 无该字段），仅作 SSE payload 用
         db.commit()
 
 
@@ -135,6 +182,11 @@ def _transition_topic_status(topic_id: int, new_status: str, summary: str | None
         db.commit()
 
 
+# ---------------------------------------------------------------------------
+# 通用发言流式 helper
+# ---------------------------------------------------------------------------
+
+
 async def _stream_speech(
     *,
     topic_id: int,
@@ -146,7 +198,7 @@ async def _stream_speech(
 ) -> AsyncIterator[dict[str, str]]:
     """通用：流式跑一段发言，期间 yield transcript(streaming, delta)。
 
-    完成后调用方负责 finalize + yield transcript(done, content)。
+    完成后写库 + yield transcript(done, content)。
     异常时标记 aborted 并 yield system 错误事件。
     """
     full_text = ""
@@ -165,7 +217,6 @@ async def _stream_speech(
                 delta=delta,
             )
     except asyncio.CancelledError:
-        # 客户端断开
         _finalize_transcript_row(transcript_id, full_text, status="aborted", reason="client disconnected")
         raise
     except Exception as exc:  # noqa: BLE001
@@ -186,18 +237,207 @@ async def _stream_speech(
     )
 
 
+# ---------------------------------------------------------------------------
+# 主循环
+# ---------------------------------------------------------------------------
+
+
+async def _run_expert_round(
+    *,
+    topic: Topic,
+    turn_number: int,
+    max_turns: int,
+    next_turn_index_val: int,
+) -> AsyncIterator[dict[str, str]]:
+    """跑一轮专家抢答发言。
+
+    流程：
+      1. 所有专家并发 decide_raise_hand
+      2. Arbiter 仲裁（写 EventPoint：hand_raise/grab_arbitration/grab_result）
+      3. 胜者发言（state 切换 + transcript streaming→done）
+      4. 其余专家回 idle
+      5. 触发 ExtractorAgent 增量抽取
+    """
+    topic_id = topic.id
+    experts = _load_experts(topic_id)
+    if not experts:
+        yield make_system_event(topic_id, "no experts to speak, skip round")
+        return
+
+    # 加载当前上下文（所有专家共享同一份）
+    with SessionLocal() as db:
+        ctx = build_context(db, topic_id, topic.title)
+
+    # 1. 各专家并发决策举手
+    agents = [
+        ExpertAgent(
+            guest_id=e.id,
+            name=e.name,
+            title=e.title,
+            stance=e.stance or "",
+            color=e.color,
+        )
+        for e in experts
+    ]
+
+    yield make_system_event(
+        topic_id,
+        f"turn {turn_number}/{max_turns}: experts deciding raise_hand",
+        phase="expert_decide",
+    )
+
+    # 并发决策：每个专家独立 LLM 调用
+    signals_raw = await asyncio.gather(
+        *(agent.decide_raise_hand(ctx, turn_number, max_turns) for agent in agents),
+        return_exceptions=True,
+    )
+    signals: list = []
+    for sig in signals_raw:
+        if isinstance(sig, Exception):
+            continue
+        if sig is not None:
+            signals.append(sig)
+
+    # 把所有专家的 thought 通过 state 事件广播（preparing 态）
+    # 胜者后续切 speaking，败者切回 idle
+    sig_by_guest_id = {s.guest_id: s for s in signals}
+    for agent in agents:
+        sig = sig_by_guest_id.get(agent.guest_id)
+        if sig is not None:
+            yield make_state_event(
+                topic_id,
+                agent.guest_id,
+                agent.name,
+                agent.color,
+                "preparing",
+                thought=sig.thought,
+            )
+        else:
+            yield make_state_event(
+                topic_id,
+                agent.guest_id,
+                agent.name,
+                agent.color,
+                "idle",
+                thought="",
+            )
+
+    # 2. 仲裁
+    arbiter = Arbiter(topic_id)
+    winner = await arbiter.arbitrate(signals, turn_index=next_turn_index_val)
+
+    if winner is None:
+        # 无人举手：所有专家回 idle，记录 moderator_intervene
+        from app.agent.arbiter import record_event
+
+        record_event(
+            topic_id,
+            "moderator_intervene",
+            guest_id=None,
+            turn_index=next_turn_index_val,
+            payload={"reason": "no expert raised hand"},
+        )
+        yield make_system_event(
+            topic_id,
+            f"turn {turn_number}: no expert raised hand, skip",
+            phase="no_speaker",
+        )
+        return
+
+    # 3. 胜者发言
+    # 找到 winner 对应的 agent 实例
+    winner_agent = next(a for a in agents if a.guest_id == winner.guest_id)
+    # 把败者切回 idle
+    for agent in agents:
+        if agent.guest_id == winner.guest_id:
+            yield make_state_event(
+                topic_id,
+                agent.guest_id,
+                agent.name,
+                agent.color,
+                "speaking",
+                thought=winner.thought,
+            )
+        else:
+            yield make_state_event(
+                topic_id,
+                agent.guest_id,
+                agent.name,
+                agent.color,
+                "idle",
+                thought="",
+            )
+
+    # 创建 transcript 行（speech_type 由 priority 决定：rebute/supplement/grab）
+    speech_type = winner.priority  # rebute/supplement/grab 对齐 schema
+    transcript_id = _create_transcript_row(
+        topic_id, winner.guest_id, next_turn_index_val, speech_type
+    )
+
+    # 重新加载 ctx（保证最新发言可见）+ Guest
+    with SessionLocal() as db:
+        speak_ctx = build_context(db, topic_id, topic.title)
+        winner_guest = db.get(Guest, winner.guest_id)
+        if winner_guest is not None:
+            db.expunge(winner_guest)
+        else:
+            # 极端 fallback：用 HandSignal 信息构造一个伪 Guest
+            winner_guest = _PseudoGuest(
+                id=winner.guest_id, name=winner.name, color=winner.color
+            )
+
+    async for ev in _stream_speech(
+        topic_id=topic_id,
+        transcript_id=transcript_id,
+        guest=winner_guest,
+        turn_index=next_turn_index_val,
+        speech_type=speech_type,
+        agent_method=lambda: winner_agent.speak(speak_ctx, priority=winner.priority),
+    ):
+        yield ev
+
+    # 胜者回 idle
+    yield make_state_event(
+        topic_id, winner.guest_id, winner.name, winner.color, "idle", thought=""
+    )
+
+    # 4. 触发抽取（T1+）
+    # 计算已有发言条数（不含开场？包含？按 PRD §6.3：T1=第1位专家发言完成）
+    with SessionLocal() as db:
+        count = db.scalar(
+            select(func.count())
+            .select_from(Transcript)
+            .where(Transcript.topic_id == topic_id)
+        ) or 0
+    if count >= settings.EXTRACTION_MIN_TRANSCRIPTS:
+        yield make_system_event(
+            topic_id,
+            f"turn {turn_number}: triggering extraction (transcripts={count})",
+            phase="extract",
+        )
+        with SessionLocal() as db:
+            extract_ctx = build_context(db, topic_id, topic.title)
+        extractor = ExtractorAgent(topic_id)
+        try:
+            insight_events = await extractor.extract_incremental(extract_ctx)
+        except Exception as exc:  # noqa: BLE001
+            yield make_system_event(topic_id, f"extraction failed: {exc}")
+            insight_events = []
+        for ev in insight_events:
+            yield ev
+
+
 async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
-    """MVP 主循环。
+    """完整主循环。
 
     yield SSE 事件 dict；调用方（stream.py 路由）用 EventSourceResponse 包装。
     """
-    topic, moderator, next_turn = _load_setup(topic_id)
-
-    agent = ModeratorAgent(name=moderator.name, title=moderator.title, color=moderator.color)
+    topic, moderator, next_turn = _load_topic_moderator(topic_id)
+    mod_agent = ModeratorAgent(name=moderator.name, title=moderator.title, color=moderator.color)
 
     yield make_system_event(topic_id, "discussion started", phase="opening")
 
-    # --- 开场白 ---
+    # --- 1. 开场白 ---
     yield make_state_event(topic_id, moderator.id, moderator.name, moderator.color, "preparing")
     yield make_state_event(topic_id, moderator.id, moderator.name, moderator.color, "speaking")
 
@@ -209,24 +449,55 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
         guest=moderator,
         turn_index=opening_turn,
         speech_type="opening",
-        agent_method=lambda: agent.opening(topic.title, topic.expert_count),
+        agent_method=lambda: mod_agent.opening(topic.title, topic.expert_count),
     ):
         yield ev
 
     yield make_state_event(topic_id, moderator.id, moderator.name, moderator.color, "idle")
 
-    # --- 切换到 summarizing，准备收尾 ---
+    # --- 2. 专家抢答循环 ---
+    max_turns = settings.MAX_TURNS
+    for turn_n in range(1, max_turns + 1):
+        next_turn_val = _next_turn_index(topic_id)
+        # 重新加载 topic（状态可能在外部变更）
+        with SessionLocal() as db:
+            fresh = db.get(Topic, topic_id)
+            if fresh is None or fresh.status not in ("ongoing", "summarizing"):
+                yield make_system_event(topic_id, f"topic status={fresh.status if fresh else 'gone'}, stop expert loop")
+                break
+            # 用 fresh topic 重新构造（detach）
+            db.expunge(fresh)
+            topic = fresh
+
+        async for ev in _run_expert_round(
+            topic=topic,
+            turn_number=turn_n,
+            max_turns=max_turns,
+            next_turn_index_val=next_turn_val,
+        ):
+            yield ev
+
+    # --- 3. 切换到 summarizing，准备收尾 ---
     _transition_topic_status(topic_id, "summarizing")
+    # 记录收尾触发事件
+    from app.agent.arbiter import record_event
+
+    record_event(
+        topic_id,
+        "closing_trigger",
+        guest_id=None,
+        turn_index=None,
+        payload={"reason": "max_turns reached or no more speakers"},
+    )
     yield make_system_event(topic_id, "phase=summary", phase="summary")
 
     yield make_state_event(topic_id, moderator.id, moderator.name, moderator.color, "preparing")
     yield make_state_event(topic_id, moderator.id, moderator.name, moderator.color, "speaking")
 
-    # 重新加载上下文（开场白已落库）
     with SessionLocal() as db:
         ctx = build_context(db, topic_id, topic.title)
 
-    summary_turn = opening_turn + 1
+    summary_turn = _next_turn_index(topic_id)
     summary_id = _create_transcript_row(topic_id, moderator.id, summary_turn, "summary")
     async for ev in _stream_speech(
         topic_id=topic_id,
@@ -234,13 +505,26 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
         guest=moderator,
         turn_index=summary_turn,
         speech_type="summary",
-        agent_method=lambda: agent.closing(ctx),
+        agent_method=lambda: mod_agent.closing(ctx),
     ):
         yield ev
 
     yield make_state_event(topic_id, moderator.id, moderator.name, moderator.color, "idle")
 
-    # --- 归档：把 summary 文本同时写到 Topic.summary ---
+    # --- 4. Extractor finalize（Tf）---
+    yield make_system_event(topic_id, "phase=finalize_insights", phase="finalize")
+    with SessionLocal() as db:
+        final_ctx = build_context(db, topic_id, topic.title)
+    extractor = ExtractorAgent(topic_id)
+    try:
+        finalize_events = await extractor.finalize(final_ctx)
+    except Exception as exc:  # noqa: BLE001
+        yield make_system_event(topic_id, f"finalize failed: {exc}")
+        finalize_events = []
+    for ev in finalize_events:
+        yield ev
+
+    # --- 5. 归档：把 summary 文本同时写到 Topic.summary ---
     summary_text = ""
     with SessionLocal() as db:
         t = db.get(Transcript, summary_id)

@@ -91,7 +91,50 @@ def summary_prompt(topic_title: str, transcript_text: str) -> list[dict[str, str
 
 
 # ---------------------------------------------------------------------------
-# 阶段 4（预留）：专家发言
+# 阶段 4：专家抢答决策
+# ---------------------------------------------------------------------------
+
+
+def raise_hand_prompt(
+    expert_name: str,
+    expert_stance: str,
+    expert_title: str,
+    topic_title: str,
+    context_text: str,
+    turn_number: int,
+    max_turns: int,
+) -> list[dict[str, str]]:
+    """专家决策是否举手 + 举手优先级（PRD §5.2/§5.3）。
+
+    返回 JSON：{will_raise: bool, priority: "grab"|"supplement"|"rebute",
+              thought: "≤30 字思考摘要"}
+    priority 含义（仲裁优先级）：
+      - rebute   反驳他人观点（最高优先级）
+      - supplement 补充信息或例子（中）
+      - grab     抢答新角度（最低）
+    """
+    system = (
+        f"你是圆桌讨论专家 {expert_name}（{expert_title}），立场倾向：{expert_stance}。"
+        f"讨论话题：{topic_title}。\n"
+        f"当前第 {turn_number}/{max_turns} 轮。\n"
+        "根据已有发言，决策本轮是否举手发言：\n"
+        "- 若有人观点与你立场冲突，且你有具体反驳论据 → priority=rebute\n"
+        "- 若发言需要补充例子/数据/视角 → priority=supplement\n"
+        "- 若想引入全新方向/抢答 → priority=grab\n"
+        "- 若无可说或已多次发言 → will_raise=false\n"
+        "严格输出 JSON（不带 markdown）：\n"
+        '{"will_raise": true|false, "priority": "grab|supplement|rebute", "thought": "≤30字思考"}\n'
+        "will_raise=false 时 priority 可填 grab。"
+    )
+    user = f"已有发言：\n{context_text}\n\n请输出决策 JSON。"
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 阶段 4：专家发言
 # ---------------------------------------------------------------------------
 
 
@@ -101,16 +144,24 @@ def expert_speak_prompt(
     expert_title: str,
     topic_title: str,
     context_text: str,
+    priority: str = "grab",
 ) -> list[dict[str, str]]:
-    """专家单轮发言。MVP 不调用，阶段 4 用。
+    """专家单轮发言。阶段 4 用。
 
     context_text 是 build_context 拼出的最近 K 条发言。
+    priority 决定发言基调：rebute=反驳 / supplement=补充 / grab=抢答新角度。
     """
+    priority_hint = {
+        "rebute": "本轮请着重反驳他人观点，给出具体反例或逻辑漏洞",
+        "supplement": "本轮请补充例子、数据或被遗漏的视角",
+        "grab": "本轮请引入新的角度或论点，开拓讨论面",
+    }.get(priority, "自然发言")
     system = (
         f"你是圆桌讨论的专家 {expert_name}（{expert_title}），立场倾向：{expert_stance}。"
         f"讨论话题：{topic_title}。\n"
+        f"{priority_hint}。\n"
         "请基于上下文发表 1 段发言（约 100-180 字），要求：\n"
-        "- 紧扣话题、保持立场一致性，可适度反驳他人\n"
+        "- 紧扣话题、保持立场一致性\n"
         "- 提供具体论点或例子，不空话\n"
         "- 不带 markdown、emoji，自然口语化\n"
     )
@@ -143,20 +194,21 @@ def followup_prompt(topic_title: str, context_text: str) -> list[dict[str, str]]
 def extract_prompt(
     topic_title: str, transcript_text: str, existing_insights: list[dict[str, Any]]
 ) -> list[dict[str, str]]:
-    """抽取共识/分歧。MVP 不调用，阶段 5 用。"""
+    """抽取共识/分歧。阶段 5 用。"""
     system = (
         "你是圆桌讨论的洞察分析 Agent。基于发言抽取共识与分歧。"
         f"讨论话题：{topic_title}。\n"
         "- 共识：多人达成一致的观点；分歧：明显对立的观点\n"
         "- 每条 summary ≤30 字\n"
         "- strength：weak/medium/strong\n"
+        "- 若是对已有 insight 的强化或修正，提供 related_existing_id（来自下方列表的 id）\n"
         "严格输出 JSON：\n"
-        '{"insights":[{"type":"consensus|divergence","summary":"...","strength":"weak|medium|strong","guest_ids":[],"transcript_ids":[]}]}\n'
-        "若无可抽取，返回 {\"insights\":[]}。"
+        '{"insights":[{"type":"consensus|divergence","summary":"...","strength":"weak|medium|strong","related_existing_id":null,"guest_names":["发言人姓名"],"transcript_ids":[]}]}\n'
+        "若无可抽取，返回 {\"insights\":[]}。transcript_ids 留空数组即可（后端会补全）。"
     )
     user = (
         f"已有发言：\n{transcript_text}\n\n"
-        f"已有 insight（避免重复）：\n{existing_insights}\n\n请抽取增量。"
+        f"已有 insight（id 用于 related_existing_id，避免重复）：\n{existing_insights}\n\n请抽取增量。"
     )
     return [
         {"role": "system", "content": system},

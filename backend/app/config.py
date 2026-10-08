@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     DEFAULT_EXPERT_COUNT: int = Field(default=4)
     MAX_EXPERT_COUNT: int = Field(default=6)
     MIN_EXPERT_COUNT: int = Field(default=2)
+    MAX_TURNS: int = Field(
+        default=8,
+        description="专家发言最大轮次，达到后主持人强制收尾",
+    )
+    EXTRACTION_MIN_TRANSCRIPTS: int = Field(
+        default=2,
+        description="触发抽取的最少发言条数（PRD §6.3 T1 起开始抽取）",
+    )
 
     def is_llm_configured(self) -> bool:
         """校验 LLM 是否已配置真实 Key（非空且非占位符）。"""
