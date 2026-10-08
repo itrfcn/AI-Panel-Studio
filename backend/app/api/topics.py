@@ -142,11 +142,20 @@ def update_topic(
 
     状态流转约束（PRD §3.2 / schema.md §4.1）：
       draft → setup → ongoing → summarizing → archived
+    非法转换返回 400。
     """
+    from app.api._state import validate_transition
+
     topic = _get_topic_or_404(db, topic_id)
-    # TODO: 校验 status 流转合法性（非法转换 400）
 
     if payload.status is not None:
+        try:
+            validate_transition(topic.status, payload.status)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
         topic.status = payload.status  # type: ignore[assignment]
         if payload.status == "ongoing" and not topic.started_at:
             topic.started_at = _now_iso()

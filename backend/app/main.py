@@ -5,16 +5,41 @@ FastAPI 应用入口。
     uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.config import settings
+from app.database import Base, engine
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：启动建表 + 预热 LLMClient；关闭时清理 httpx。"""
+    # startup
+    Base.metadata.create_all(bind=engine)
+    # 预热 LLMClient 单例（仅当已配置 Key），便于首请求不卡建连
+    if settings.is_llm_configured():
+        try:
+            from app.llm import get_llm_client
+
+            get_llm_client()
+        except Exception:  # noqa: BLE001 — 启动期不阻断
+            pass
+    yield
+    # shutdown
+    from app.llm import shutdown_llm_client
+
+    await shutdown_llm_client()
+
 
 app = FastAPI(
     title="AI Panel Studio API",
-    description="AI 圆桌讨论 Web App MVP 后端（骨架版，LLM 调用待接入）",
-    version="0.1.0",
+    description="AI 圆桌讨论 Web App 后端（主持人开场/收尾已接入 LLM）",
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 # CORS：MVP 本地开发放开，生产按需收紧
@@ -25,15 +50,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def _on_startup() -> None:
-    """启动时确保表存在（不 drop）。"""
-    # 仅 create_all，不 drop；样例数据走 scripts/init_db.py
-    from app.database import Base, engine
-
-    Base.metadata.create_all(bind=engine)
 
 
 @app.get("/health", tags=["meta"])
