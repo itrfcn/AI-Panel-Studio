@@ -20,7 +20,7 @@ const divergence = computed(() => props.insights.filter((i) => i.type === 'diver
       <p class="text-xs text-gray-400 mt-0.5">chain-of-thought · 实时生成</p>
     </div>
 
-    <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+    <div class="grow min-h-0 overflow-y-auto lg:flex-1 p-4 space-y-4">
       <p v-if="loading && !insights.length" class="text-gray-400 text-sm">抽取中…</p>
 
       <!-- 共识区 -->

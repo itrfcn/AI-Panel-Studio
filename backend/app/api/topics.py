@@ -231,14 +231,18 @@ def get_guest_thoughts(
         .order_by(EventPoint.turn_index.asc(), EventPoint.id.asc())
     ).scalars().all()
 
-    # 该嘉宾的所有发言，按 turn_index 索引
+    # 该嘉宾的所有发言（turn_index 升序）。
+    # 注意：举手事件的 turn_index 是该轮首条发言的序号，而轮内专家依次发言，
+    # 实际发言序号会递增（N+1/N+2…），不能按 turn_index 相等匹配。
+    # 贪心对齐：每次举手匹配「序号不早于举手、且未被消费的最早一条发言」。
     speeches = db.execute(
         select(Transcript).where(
             Transcript.topic_id == topic_id,
             Transcript.guest_id == guest_id,
         )
     ).scalars().all()
-    speech_by_turn = {t.turn_index: t for t in speeches}
+    speeches_sorted = sorted(speeches, key=lambda t: t.turn_index)
+    consumed: set[int] = set()
 
     timeline: list[dict] = []
     for ev in events:
@@ -248,8 +252,17 @@ def get_guest_thoughts(
             payload = _json.loads(ev.payload) if ev.payload else {}
         except ValueError:
             payload = {}
-        turn = ev.turn_index
-        transcript = speech_by_turn.get(turn)
+        turn = ev.turn_index or 0
+        transcript = next(
+            (
+                t
+                for t in speeches_sorted
+                if t.turn_index >= turn and t.id not in consumed
+            ),
+            None,
+        )
+        if transcript is not None:
+            consumed.add(transcript.id)
         timeline.append(
             {
                 "turn_index": turn,

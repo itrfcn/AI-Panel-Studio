@@ -32,15 +32,15 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="h-full flex">
-    <!-- 左侧：讨论列表（独立滚动） -->
-    <div class="w-full max-w-2xl mx-auto lg:mx-0 lg:w-96 shrink-0 border-r border-studio-border h-full">
+  <div class="h-full flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
+    <!-- 左侧：讨论列表 — 移动端自然高度随页滚动，桌面端独立滚动 -->
+    <div class="w-full lg:w-96 shrink-0 border-b lg:border-b-0 lg:border-r border-studio-border lg:h-full">
       <TopicList :topics="topics" :loading="loading" @select="onSelect" @new="router.push('/setup')" />
     </div>
 
-    <!-- 右侧：欢迎/说明区（独立滚动） -->
-    <div class="flex-1 min-w-0 overflow-y-auto p-8">
-      <div class="max-w-2xl">
+    <!-- 右侧：欢迎/说明区 — 移动端自然高度随页滚动，桌面端独立滚动并垂直居中 -->
+    <div class="flex-1 min-w-0 lg:overflow-y-auto p-4 sm:p-8 lg:flex lg:flex-col">
+      <div class="max-w-3xl w-full mx-auto lg:my-auto">
         <!-- 后端连接失败提示 -->
         <div
           v-if="loadError"
@@ -56,13 +56,13 @@ onMounted(load)
             @click="load"
           >重试</button>
         </div>
-        <h1 class="text-3xl font-semibold mb-3">AI 圆桌演播厅</h1>
+        <h1 class="text-2xl sm:text-3xl lg:text-4xl font-semibold mb-3">AI 圆桌演播厅</h1>
         <p class="text-gray-400 leading-relaxed">
           召集一支虚拟智库，围绕任意议题展开深度碰撞。主持人负责开场、追问与收尾，
           专家自主"举手"抢答与反驳，过程中实时生成共识与分歧。
         </p>
 
-        <div class="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-4 lg:gap-5">
           <div class="rounded-lg border border-studio-border bg-studio-panel p-4">
             <div class="text-sm text-blue-300 mb-1">多 Agent 协作</div>
             <p class="text-xs text-gray-400">主持人与 N 位专家分阶段分上下文对话，避免幻觉</p>
@@ -82,7 +82,7 @@ onMounted(load)
         </div>
 
         <p class="mt-8 text-sm text-gray-500">
-          👈 从左侧选择一场讨论加入观察，或点击「发起新讨论」开始。
+          从讨论列表选择一场加入观察，或点击「发起新讨论」开始。
         </p>
       </div>
     </div>

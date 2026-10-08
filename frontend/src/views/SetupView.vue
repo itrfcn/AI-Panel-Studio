@@ -98,9 +98,9 @@ async function onConfirm() {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="max-w-3xl mx-auto p-6 space-y-6">
+    <div class="max-w-3xl mx-auto p-4 sm:p-6 space-y-6">
       <div>
-        <h1 class="text-2xl font-semibold mb-1">发起新讨论</h1>
+        <h1 class="text-xl sm:text-2xl font-semibold mb-1">发起新讨论</h1>
         <p class="text-sm text-gray-400">输入话题与专家人数，系统将生成主持人与专家阵容</p>
       </div>
 

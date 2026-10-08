@@ -35,7 +35,9 @@ watch(
       <span class="text-xs text-gray-400">{{ messages.length }} 条发言</span>
     </div>
 
-    <div ref="scroller" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+    <div ref="scroller" class="flex-1 min-h-0 overflow-y-auto p-4">
+      <!-- 超宽屏下限宽居中，避免单行文字过长 -->
+      <div class="max-w-4xl mx-auto space-y-4">
       <div
         v-for="m in messages"
         :key="m.id || m.turn_index"
@@ -63,6 +65,7 @@ watch(
       <p v-if="!messages.length" class="text-gray-500 text-sm text-center py-8">
         等待讨论开始…
       </p>
+      </div>
     </div>
   </section>
 </template>

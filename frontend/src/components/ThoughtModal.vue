@@ -50,7 +50,7 @@ const priorityLabel = { grab: '抢答意图', supplement: '补充意图', rebute
     <div class="absolute inset-0 bg-black/60" @click="emit('close')"></div>
 
     <!-- 弹窗主体 -->
-    <div class="relative w-full max-w-lg max-h-[80vh] flex flex-col rounded-xl border border-studio-border bg-studio-panel shadow-2xl">
+    <div class="relative w-full max-w-lg max-h-[85dvh] flex flex-col rounded-xl border border-studio-border bg-studio-panel shadow-2xl">
       <!-- 头部：嘉宾信息 -->
       <div class="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-studio-border">
         <div

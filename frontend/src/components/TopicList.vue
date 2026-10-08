@@ -35,7 +35,7 @@ const sorted = computed(() =>
       </button>
     </div>
 
-    <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+    <div class="grow min-h-0 overflow-y-auto lg:flex-1 p-4 space-y-3">
       <p v-if="loading" class="text-gray-400 text-sm">加载中…</p>
       <p v-else-if="!sorted.length" class="text-gray-500 text-sm">暂无讨论，点击右上角发起新讨论。</p>
 
