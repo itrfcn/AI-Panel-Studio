@@ -11,7 +11,12 @@ from typing import AsyncIterator
 
 from app.agent.base import AgentContext
 from app.llm import get_llm_client
-from app.llm.prompts import followup_prompt, opening_prompt, summary_prompt
+from app.llm.prompts import (
+    followup_prompt,
+    opening_prompt,
+    should_continue_prompt,
+    summary_prompt,
+)
 
 
 class ModeratorAgent:
@@ -41,7 +46,7 @@ class ModeratorAgent:
         """每轮专家发言后，流式输出串联/追问，引导下一轮方向。"""
         client = get_llm_client()
         messages = followup_prompt(ctx.topic_title, ctx.as_text())
-        async for delta in client.chat_stream(messages, temperature=0.5, max_tokens=128):
+        async for delta in client.chat_stream(messages, temperature=0.5, max_tokens=256):
             yield delta
 
     async def closing(self, ctx: AgentContext) -> AsyncIterator[str]:
@@ -50,3 +55,22 @@ class ModeratorAgent:
         messages = summary_prompt(ctx.topic_title, ctx.as_text())
         async for delta in client.chat_stream(messages, temperature=0.4, max_tokens=512):
             yield delta
+
+    async def should_continue(
+        self, ctx: AgentContext, turn_number: int, max_turns: int, stale_round: bool
+    ) -> tuple[bool, str]:
+        """判断讨论是否应继续。返回 (是否继续, 原因)。stale_round=上轮无新洞见。"""
+        client = get_llm_client()
+        messages = should_continue_prompt(
+            ctx.topic_title, ctx.as_text(), turn_number, max_turns, stale_round
+        )
+        try:
+            result = await client.chat_json(messages, temperature=0.3, max_tokens=128)
+        except Exception:
+            # 解析失败时：上轮已无新内容则收尾，否则继续
+            if stale_round:
+                return False, "上轮无新洞见，默认收尾"
+            return True, "决策解析失败，默认继续"
+        cont = bool(result.get("continue", True))
+        reason = str(result.get("reason", ""))
+        return cont, reason

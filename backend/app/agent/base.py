@@ -39,7 +39,10 @@ class AgentContext:
                 lines.append(f"[guest#{t.guest_id}]：{t.content}")
                 continue
             if g.role == "moderator":
-                lines.append(f"[主持人]{g.name}：{t.content}")
+                if t.speech_type == "followup":
+                    lines.append(f"[主持人追问]{g.name}：{t.content}")
+                else:
+                    lines.append(f"[主持人]{g.name}：{t.content}")
             else:
                 # 标注专家立场，便于其他专家识别该反驳谁
                 stance = f"（{g.stance}）" if g.stance else ""

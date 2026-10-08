@@ -120,11 +120,13 @@ def raise_hand_prompt(
         f"你是圆桌讨论专家 {expert_name}（{expert_title}），你的独立立场：{expert_stance}。"
         f"讨论话题：{topic_title}。\n"
         f"当前第 {turn_number}/{max_turns} 轮。\n\n"
-        "你是一个独立思考的个体，有自己的判断和坚持。根据已有发言，决策本轮是否举手发言：\n"
-        "- 若有人观点与你立场冲突，即使对方是多数派，你也应坚持己见举手反驳 → priority=rebute\n"
-        "- 若你有独特的例子/数据/视角尚未被提及 → priority=supplement\n"
-        "- 若你想从全新角度切入讨论 → priority=grab\n"
-        "- 只有当你完全无话可说且与所有发言都一致时，才 will_raise=false\n"
+        "你是一个独立思考的个体，有自己的判断和坚持。根据已有发言，决策本轮是否举手发言：\n\n"
+        "【主持人引导】如果上下文中有【主持人追问】的内容，你必须优先回应主持人的问题。"
+        "如果主持人点了你的名，你必须举手回答（will_raise=true），且 priority=grab 以优先发言。\n"
+        "【观点交锋】若有人观点与你立场冲突，即使对方是多数派，你也应坚持己见举手反驳 → priority=rebute\n"
+        "【补充】若你有独特的例子/数据/视角尚未被提及 → priority=supplement\n"
+        "【新角度】若你想从全新角度切入讨论 → priority=grab\n"
+        "只有当你完全无话可说且与所有发言都一致时，才 will_raise=false\n"
         "记住：独立思考意味着不人云亦云，敢于表达不同意见。\n"
         "严格输出 JSON（不带 markdown）：\n"
         '{"will_raise": true|false, "priority": "grab|supplement|rebute", "thought": "≤30字思考"}\n'
@@ -165,6 +167,7 @@ def expert_speak_prompt(
         f"讨论话题：{topic_title}。\n"
         f"{priority_hint}。\n"
         "请基于上下文发表 1-2 句话（不超过 80 字），要求：\n"
+        "- 若上下文中有【主持人追问】且点了你的名，必须第一句就直接回答主持人的问题，然后再反驳或补充\n"
         "- 坚守你的独立立场，不被他人观点带偏\n"
         "- 若有人观点与你冲突，直接点名反驳，给出你的论据\n"
         "- 提供具体论点或例子，不空话\n"
@@ -180,17 +183,59 @@ def expert_speak_prompt(
 
 
 def followup_prompt(topic_title: str, context_text: str) -> list[dict[str, str]]:
-    """主持人串联/追问。每轮专家发言后调用，引导下一轮讨论方向。"""
+    """主持人串联/追问。每轮专家发言后调用，强力引导下一轮讨论方向。"""
     system = (
-        "你是圆桌讨论的主持人。根据本轮专家发言，输出简短的串联或追问（1-2 句话，不超过 60 字）。"
-        f"讨论话题：{topic_title}。\n"
-        "可以：\n"
-        "- 追问某位专家的观点细节\n"
-        "- 指出专家间的分歧，引导下一轮辩论\n"
-        "- 简短过渡，引出新的讨论方向\n"
+        "你是圆桌讨论的主持人，你的职责是控制讨论节奏、引导深入、激发交锋。"
+        f"讨论话题：{topic_title}。\n\n"
+        "根据本轮专家发言，输出一段引导性追问（2-3 句话，不超过 100 字）。要求：\n"
+        "1. 必须点名 1-2 位专家，向他们提出具体问题（如「陈启川，你能否举例说明…？」）\n"
+        "2. 明确指出本轮讨论的焦点或分歧，引导下一轮围绕此展开\n"
+        "3. 你的追问必须让专家有话可说，激发他们反驳或补充\n"
+        "4. 不要泛泛而谈，要具体、有针对性\n"
         "不带 markdown/emoji，自然口语化。"
     )
-    user = f"已有发言：\n{context_text}\n\n请输出串联或追问。"
+    user = f"已有发言：\n{context_text}\n\n请输出引导性追问。"
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def should_continue_prompt(
+    topic_title: str,
+    context_text: str,
+    turn_number: int,
+    max_turns: int,
+    stale_round: bool,
+) -> list[dict[str, str]]:
+    """主持人判断讨论是否应继续。每轮追问后调用。stale_round=上一轮没有产生任何新洞见。"""
+    system = (
+        f"你是圆桌讨论的主持人。讨论话题：{topic_title}。\n"
+        f"当前已进行第 {turn_number}/{max_turns} 轮。\n"
+        + (
+            "【重要信号】上一轮的所有发言都没有产生任何新论据或新角度——"
+            "专家在重复之前的观点，讨论已原地打转。\n\n"
+            if stale_round
+            else "\n"
+        )
+        + "判断标准（按专家立场强对立的圆桌设计，不要期待达成共识）：\n"
+        "应收尾的条件：\n"
+        "- 最近一轮发言与之前的观点高度重复，只是换措辞重说\n"
+        "- 各方立场和论据已经完整表达，没有新角度可挖\n"
+        f"- 已接近最大轮次（{max_turns} 轮）\n"
+        "应继续的条件：\n"
+        "- 最近一轮出现了新论据、新例证或新角度，值得深挖\n"
+        "- 某位专家的论点尚未被其他专家正面回应\n"
+        "- 有一方明显回避了关键质疑，需要追问\n"
+        "严格输出 JSON（不带 markdown）：\n"
+        '{"continue": true|false, "reason": "≤30字说明"}\n'
+        + (
+            "上一轮已无新内容，除非你发现仍有重大未被回应的分歧，否则应收尾（continue=false）。"
+            if stale_round
+            else "若上一轮有实质新内容，倾向继续。"
+        )
+    )
+    user = f"已有发言：\n{context_text}\n\n请判断是否继续。"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},

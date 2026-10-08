@@ -566,6 +566,39 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
         ):
             yield ev
 
+        # 等本轮抽取完成并统计新洞见数（作为主持人决策信号；
+        # 本来在下一轮开头/收尾前也要 await，不增加总耗时）
+        new_insights = 0
+        while pending_extracts:
+            task = pending_extracts.pop(0)
+            try:
+                insight_events = await task
+            except Exception as exc:  # noqa: BLE001
+                yield make_system_event(topic_id, f"extraction failed: {exc}")
+                insight_events = []
+            new_insights += len(insight_events)
+            for ev in insight_events:
+                yield ev
+
+        # 主持人判断是否继续（至少 2 轮后才允许提前收尾）
+        min_turns_before_close = 2
+        if turn_n >= min_turns_before_close and mod_agent is not None:
+            with SessionLocal() as db:
+                decide_ctx = build_context(db, topic_id, topic.title)
+            cont, reason = await mod_agent.should_continue(
+                decide_ctx,
+                turn_number=turn_n,
+                max_turns=max_turns,
+                stale_round=(new_insights == 0),
+            )
+            yield make_system_event(
+                topic_id,
+                f"moderator decide: continue={cont} new_insights={new_insights} ({reason})",
+                phase="decide" if cont else "closing",
+            )
+            if not cont:
+                break
+
     # 收尾前等最后一批抽取完成
     while pending_extracts:
         task = pending_extracts.pop(0)
