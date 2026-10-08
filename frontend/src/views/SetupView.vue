@@ -18,6 +18,30 @@ const confirming = ref(false)
 const roster = ref(null) // { guests, is_confirmed }
 const topicId = ref(null) // 已创建的话题 id，重新生成阵容时复用
 const error = ref('')
+const genStep = ref('') // 分步进度文案
+
+const STEPS = [
+  { delay: 0, text: '正在分析话题…' },
+  { delay: 4000, text: '正在生成主持人…' },
+  { delay: 10000, text: '正在生成专家阵容…' },
+  { delay: 20000, text: '正在优化角色细节…' },
+  { delay: 35000, text: '仍在生成中，请稍候…' },
+]
+
+function startSteps() {
+  stopSteps()
+  genStep.value = STEPS[0].text
+  for (let i = 1; i < STEPS.length; i++) {
+    const s = STEPS[i]
+    setTimeout(() => {
+      if (generating.value) genStep.value = s.text
+    }, s.delay)
+  }
+}
+
+function stopSteps() {
+  genStep.value = ''
+}
 
 async function onGenerate() {
   error.value = ''
@@ -27,6 +51,7 @@ async function onGenerate() {
   }
   generating.value = true
   roster.value = null
+  startSteps()
   try {
     // 1. 首次创建讨论（draft）；重新生成阵容时复用同一 topic
     if (topicId.value === null) {
@@ -43,6 +68,7 @@ async function onGenerate() {
     error.value = e.message || '生成失败'
   } finally {
     generating.value = false
+    stopSteps()
   }
 }
 
@@ -107,6 +133,10 @@ async function onConfirm() {
         >
           {{ generating ? '生成中…' : roster ? '重新生成阵容' : '生成阵容' }}
         </button>
+        <div v-if="generating" class="flex items-center gap-2 text-sm text-gray-400">
+          <span class="w-4 h-4 border-2 border-studio-accent border-t-transparent rounded-full animate-spin"></span>
+          <span>{{ genStep }}</span>
+        </div>
         <p v-if="error" class="text-sm text-red-400">{{ error }}</p>
       </section>
 

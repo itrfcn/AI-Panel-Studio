@@ -277,7 +277,7 @@ class ExtractorAgent:
         existing = _load_existing_insights(self.topic_id)
         messages = extract_prompt(ctx.topic_title, ctx.as_text(), existing)
         try:
-            raw = await client.chat_json(messages, temperature=0.3)
+            raw = await client.chat_json(messages, temperature=0.3, max_tokens=512)
         except LLMJsonError:
             return []
         if not isinstance(raw, dict):

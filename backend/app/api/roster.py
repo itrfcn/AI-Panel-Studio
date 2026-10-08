@@ -129,6 +129,7 @@ async def generate_roster(
         raw = await client.chat_json(
             roster_prompt(topic.title, expert_count),
             temperature=0.8,
+            max_tokens=1024,
         )
     except LLMJsonError as exc:
         raise HTTPException(

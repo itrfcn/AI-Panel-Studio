@@ -34,12 +34,12 @@ class ModeratorAgent:
         """流式输出开场白，逐 delta yield。"""
         client = get_llm_client()
         messages = opening_prompt(topic_title, self.name, expert_count)
-        async for delta in client.chat_stream(messages, temperature=0.7):
+        async for delta in client.chat_stream(messages, temperature=0.7, max_tokens=512):
             yield delta
 
     async def closing(self, ctx: AgentContext) -> AsyncIterator[str]:
         """流式输出收尾总结，基于已有发言。"""
         client = get_llm_client()
         messages = summary_prompt(ctx.topic_title, ctx.as_text())
-        async for delta in client.chat_stream(messages, temperature=0.4):
+        async for delta in client.chat_stream(messages, temperature=0.4, max_tokens=768):
             yield delta

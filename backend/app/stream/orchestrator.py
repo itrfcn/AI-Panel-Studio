@@ -284,6 +284,7 @@ async def _run_expert_round(
     turn_number: int,
     max_turns: int,
     next_turn_index_val: int,
+    pending_extracts: list[asyncio.Task] | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """跑一轮专家抢答发言。
 
@@ -358,11 +359,15 @@ async def _run_expert_round(
                 thought="",
             )
 
-    # 2. 仲裁
+    # 2. 仲裁（所有举手者按优先级排序发言，不人为限制谁该发言）
     arbiter = Arbiter(topic_id)
-    winner = await arbiter.arbitrate(signals, turn_index=next_turn_index_val)
+    winners = await arbiter.arbitrate(
+        signals,
+        turn_index=next_turn_index_val,
+        max_speakers=3,
+    )
 
-    if winner is None:
+    if not winners:
         # 无人举手：所有专家回 idle，记录 moderator_intervene
         from app.agent.arbiter import record_event
 
@@ -380,21 +385,11 @@ async def _run_expert_round(
         )
         return
 
-    # 3. 胜者发言
-    # 找到 winner 对应的 agent 实例
-    winner_agent = next(a for a in agents if a.guest_id == winner.guest_id)
-    # 把败者切回 idle
+    winner_ids = {w.guest_id for w in winners}
+
+    # 3. 败者先切回 idle
     for agent in agents:
-        if agent.guest_id == winner.guest_id:
-            yield make_state_event(
-                topic_id,
-                agent.guest_id,
-                agent.name,
-                agent.color,
-                "speaking",
-                thought=winner.thought,
-            )
-        else:
+        if agent.guest_id not in winner_ids:
             yield make_state_event(
                 topic_id,
                 agent.guest_id,
@@ -404,40 +399,61 @@ async def _run_expert_round(
                 thought="",
             )
 
-    # 创建 transcript 行（speech_type 由 priority 决定：rebute/supplement/grab）
-    speech_type = winner.priority  # rebute/supplement/grab 对齐 schema
-    transcript_id = _create_transcript_row(
-        topic_id, winner.guest_id, next_turn_index_val, speech_type
-    )
+    # 4. 胜者依次发言（第二个能看到第一个的发言，形成交锋）
+    current_turn = next_turn_index_val
+    for winner in winners:
+        winner_agent = next(a for a in agents if a.guest_id == winner.guest_id)
 
-    # 重新加载 ctx（保证最新发言可见）+ Guest
-    with SessionLocal() as db:
-        speak_ctx = build_context(db, topic_id, topic.title)
-        winner_guest = db.get(Guest, winner.guest_id)
-        if winner_guest is not None:
-            db.expunge(winner_guest)
-        else:
-            # 极端 fallback：用 HandSignal 信息构造一个伪 Guest
-            winner_guest = _PseudoGuest(
-                id=winner.guest_id, name=winner.name, color=winner.color
-            )
+        yield make_state_event(
+            topic_id,
+            winner.guest_id,
+            winner_agent.name,
+            winner_agent.color,
+            "speaking",
+            thought=winner.thought,
+        )
 
-    async for ev in _stream_speech(
-        topic_id=topic_id,
-        transcript_id=transcript_id,
-        guest=winner_guest,
-        turn_index=next_turn_index_val,
-        speech_type=speech_type,
-        agent_method=lambda: winner_agent.speak(speak_ctx, priority=winner.priority),
-    ):
-        yield ev
+        speech_type = winner.priority
+        transcript_id = _create_transcript_row(
+            topic_id, winner.guest_id, current_turn, speech_type
+        )
 
-    # 胜者回 idle
-    yield make_state_event(
-        topic_id, winner.guest_id, winner.name, winner.color, "idle", thought=""
-    )
+        # 每位发言前重载上下文（保证能看到前一位的发言）
+        with SessionLocal() as db:
+            speak_ctx = build_context(db, topic_id, topic.title)
+            winner_guest = db.get(Guest, winner.guest_id)
+            if winner_guest is not None:
+                db.expunge(winner_guest)
+            else:
+                winner_guest = _PseudoGuest(
+                    id=winner.guest_id, name=winner.name, color=winner.color
+                )
 
-    # 4. 触发抽取（T1+）
+        async for ev in _stream_speech(
+            topic_id=topic_id,
+            transcript_id=transcript_id,
+            guest=winner_guest,
+            turn_index=current_turn,
+            speech_type=speech_type,
+            agent_method=lambda w=winner, wa=winner_agent, sc=speak_ctx: wa.speak(
+                sc, priority=w.priority
+            ),
+        ):
+            yield ev
+
+        # 该胜者回 idle
+        yield make_state_event(
+            topic_id,
+            winner.guest_id,
+            winner_agent.name,
+            winner_agent.color,
+            "idle",
+            thought="",
+        )
+
+        current_turn = _next_turn_index(topic_id)
+
+    # 4. 触发抽取（T1+）— 后台并发，不阻塞下一轮决策
     # 计算已有发言条数（不含开场？包含？按 PRD §6.3：T1=第1位专家发言完成）
     with SessionLocal() as db:
         count = db.scalar(
@@ -454,13 +470,9 @@ async def _run_expert_round(
         with SessionLocal() as db:
             extract_ctx = build_context(db, topic_id, topic.title)
         extractor = ExtractorAgent(topic_id)
-        try:
-            insight_events = await extractor.extract_incremental(extract_ctx)
-        except Exception as exc:  # noqa: BLE001
-            yield make_system_event(topic_id, f"extraction failed: {exc}")
-            insight_events = []
-        for ev in insight_events:
-            yield ev
+        task = asyncio.create_task(extractor.extract_incremental(extract_ctx))
+        if pending_extracts is not None:
+            pending_extracts.append(task)
 
 
 async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
@@ -493,7 +505,19 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
 
     # --- 2. 专家抢答循环 ---
     max_turns = settings.MAX_TURNS
+    pending_extracts: list[asyncio.Task] = []
     for turn_n in range(1, max_turns + 1):
+        # 等上一轮抽取完成（如果还在跑），与本轮专家决策并发不冲突
+        while pending_extracts:
+            task = pending_extracts.pop(0)
+            try:
+                insight_events = await task
+            except Exception as exc:  # noqa: BLE001
+                yield make_system_event(topic_id, f"extraction failed: {exc}")
+                insight_events = []
+            for ev in insight_events:
+                yield ev
+
         next_turn_val = _next_turn_index(topic_id)
         # 重新加载 topic（状态可能在外部变更）
         with SessionLocal() as db:
@@ -510,7 +534,19 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
             turn_number=turn_n,
             max_turns=max_turns,
             next_turn_index_val=next_turn_val,
+            pending_extracts=pending_extracts,
         ):
+            yield ev
+
+    # 收尾前等最后一批抽取完成
+    while pending_extracts:
+        task = pending_extracts.pop(0)
+        try:
+            insight_events = await task
+        except Exception as exc:  # noqa: BLE001
+            yield make_system_event(topic_id, f"extraction failed: {exc}")
+            insight_events = []
+        for ev in insight_events:
             yield ev
 
     # --- 3. 切换到 summarizing，准备收尾 ---

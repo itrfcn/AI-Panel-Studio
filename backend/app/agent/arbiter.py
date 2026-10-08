@@ -67,15 +67,18 @@ class Arbiter:
         self,
         signals: list[HandSignal],
         turn_index: int,
-    ) -> HandSignal | None:
-        """对一组举手信号仲裁，返回获胜者。
+        max_speakers: int = 3,
+    ) -> list[HandSignal]:
+        """对一组举手信号仲裁，返回排序后的发言者列表（前 max_speakers 个）。
 
-        - 记录 hand_raise 事件（每个举手者一条）
-        - 记录 grab_arbitration 事件（仲裁输入与决策）
-        - 记录 grab_result 事件（获胜者）
+        所有举手的专家都有机会发言——发言意图由专家自身 decide_raise_hand
+        决定，仲裁器只负责按优先级排序（rebute > supplement > grab），
+        不人为干预谁该发言。
+        - 同级按举手时间戳 FIFO（asyncio.gather 返回顺序近似时间戳）
+        - 记录 hand_raise / grab_arbitration / grab_result 事件
         """
         if not signals:
-            return None
+            return []
 
         # 1. 记录每个 hand_raise
         for sig in signals:
@@ -87,7 +90,7 @@ class Arbiter:
                 payload={"priority": sig.priority, "thought": sig.thought},
             )
 
-        # 2. 仲裁：按优先级权重降序，相同则保持输入顺序（FIFO 近似时间戳）
+        # 2. 仲裁：按优先级降序，同级 FIFO
         weighted = list(enumerate(signals))
         weighted.sort(
             key=lambda pair: (
@@ -95,7 +98,7 @@ class Arbiter:
                 pair[0],
             )
         )
-        winner = weighted[0][1]
+        winners = [pair[1] for pair in weighted[:max_speakers]]
 
         # 3. 记录 grab_arbitration + grab_result
         record_event(
@@ -115,17 +118,18 @@ class Arbiter:
                 "rule": "rebute > supplement > grab; FIFO within same priority",
             },
         )
-        record_event(
-            self.topic_id,
-            "grab_result",
-            guest_id=winner.guest_id,
-            turn_index=turn_index,
-            payload={
-                "winner": winner.name,
-                "priority": winner.priority,
-            },
-        )
-        return winner
+        for w in winners:
+            record_event(
+                self.topic_id,
+                "grab_result",
+                guest_id=w.guest_id,
+                turn_index=turn_index,
+                payload={
+                    "winner": w.name,
+                    "priority": w.priority,
+                },
+            )
+        return winners
 
 
 # 优先级权重表（数值越大越优先）—与 ExpertAgent.PRIORITY_WEIGHT 保持一致

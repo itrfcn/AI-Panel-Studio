@@ -71,7 +71,7 @@ class ExpertAgent:
             max_turns=max_turns,
         )
         try:
-            raw = await client.chat_json(messages, temperature=0.3)
+            raw = await client.chat_json(messages, temperature=0.3, max_tokens=128)
         except LLMJsonError:
             # LLM 返回非 JSON 时保守不举手
             return None
@@ -108,5 +108,5 @@ class ExpertAgent:
             context_text=ctx.as_text(),
             priority=priority,
         )
-        async for delta in client.chat_stream(messages, temperature=0.7):
+        async for delta in client.chat_stream(messages, temperature=0.7, max_tokens=384):
             yield delta
