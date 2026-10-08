@@ -6,8 +6,6 @@ MVP：通过 orchestrator.run_discussion 跑主持人单轮（开场→收尾）
 所有 SSE 事件对齐前端 frontend/src/api/stream.js 的 handler。
 """
 
-import asyncio
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
@@ -15,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models import Topic
-from app.stream import run_discussion
+from app.stream.runner import subscribe as subscribe_run
 
 router = APIRouter(prefix="/topics/{topic_id}/stream", tags=["stream"])
 
@@ -59,13 +57,12 @@ async def stream_discussion(
         )
 
     async def event_generator():
-        """包装 orchestrator：流结束前再发心跳保活。"""
-        try:
-            async for ev in run_discussion(topic_id):
-                yield ev
-        except asyncio.CancelledError:
-            # 客户端断开：orchestrator 内部已置 in-flight transcript 为 aborted
-            return
+        """订阅服务端单实例编排：多个连接共享同一场讨论。
+
+        晚加入者会收到 history 补发；客户端断开仅退订，不影响讨论继续。
+        """
+        async for ev in subscribe_run(topic_id):
+            yield ev
 
     return EventSourceResponse(event_generator())
 

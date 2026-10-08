@@ -1,7 +1,7 @@
 <script setup>
 // 准备页 — 输入话题与专家人数，生成阵容，确认后进入演播厅
 // PRD §4.2
-import { reactive, ref } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createTopic } from '../api/topics'
 import { generateRoster, confirmRoster } from '../api/roster'
@@ -16,6 +16,7 @@ const creating = ref(false)
 const generating = ref(false)
 const confirming = ref(false)
 const roster = ref(null) // { guests, is_confirmed }
+const topicId = ref(null) // 已创建的话题 id，重新生成阵容时复用
 const error = ref('')
 
 async function onGenerate() {
@@ -27,17 +28,32 @@ async function onGenerate() {
   generating.value = true
   roster.value = null
   try {
-    // 1. 创建讨论（draft）
-    const topic = await createTopic({ title: form.title.trim(), expert_count: form.expert_count })
-    // 2. 生成阵容
-    const r = await generateRoster(topic.id, { expert_count: form.expert_count })
-    roster.value = { ...r, _topicId: topic.id }
+    // 1. 首次创建讨论（draft）；重新生成阵容时复用同一 topic
+    if (topicId.value === null) {
+      const topic = await createTopic({
+        title: form.title.trim(),
+        expert_count: form.expert_count,
+      })
+      topicId.value = topic.id
+    }
+    // 2. 生成阵容（后端会先清旧候选再写新阵容）
+    const r = await generateRoster(topicId.value, { expert_count: form.expert_count })
+    roster.value = { ...r, _topicId: topicId.value }
   } catch (e) {
     error.value = e.message || '生成失败'
   } finally {
     generating.value = false
   }
 }
+
+// 话题标题被修改后，旧 topic 不再适用，下次生成时重建
+watch(
+  () => form.title,
+  () => {
+    topicId.value = null
+    roster.value = null
+  },
+)
 
 async function onConfirm() {
   if (!roster.value) return

@@ -9,10 +9,15 @@ export async function generateRoster(topicId, { expert_count } = {}) {
     return mock.getRoster(topicId)
   }
   try {
-    const { data } = await http.post(`/api/topics/${topicId}/roster/generate`, {
-      topic_id: topicId,
-      expert_count,
-    })
+    const { data } = await http.post(
+      `/api/topics/${topicId}/roster/generate`,
+      {
+        topic_id: topicId,
+        expert_count,
+      },
+      // LLM 生成阵容耗时较长（实测 30-60s），叠加上游过载重试最坏可达 ~3 分钟
+      { timeout: 200000 },
+    )
     return data
   } catch (err) {
     throw new Error(unwrapError(err))

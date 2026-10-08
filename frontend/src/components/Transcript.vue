@@ -19,9 +19,9 @@ const speechTypeLabel = {
   summary: '收尾',
 }
 
-// 新消息到达时自动滚动到底部
+// 新消息到达或流式内容增长时自动滚动到底部
 watch(
-  () => props.messages.length,
+  () => [props.messages.length, props.messages[props.messages.length - 1]?.content?.length || 0],
   async () => {
     await nextTick()
     if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight

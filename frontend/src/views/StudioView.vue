@@ -1,7 +1,7 @@
 <script setup>
 // 演播厅视图 — 编排 StudioRoom + SSE 订阅
 // PRD §4.3 演播厅模式 + §6 实时共识/分歧
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import StudioRoom from '../components/StudioRoom.vue'
 import { getTopic, startDiscussion } from '../api/topics'
@@ -12,6 +12,7 @@ const props = defineProps({ id: { type: [String, Number], required: true } })
 const router = useRouter()
 
 const topic = ref(null)
+// 消息按 transcript_id 聚合：真实 SSE 一条发言会先推若干 streaming delta，再推 done
 const messages = ref([])
 const insights = ref([])
 const guestStates = reactive({}) // { [guestId]: { state, thought } }
@@ -38,22 +39,81 @@ function setSpeaking(guestId) {
   }
 }
 
+function guestMap() {
+  const m = {}
+  for (const g of topic.value?.guests || []) m[g.id] = g
+  return m
+}
+
 async function loadArchived() {
-  // archived：回放完整 transcript + insights
+  // archived：回放完整 transcript + insights（真实后端 /stream/replay）
   const replay = await replayDiscussion(props.id)
-  messages.value = replay.transcripts || []
-  insights.value = replay.insights || (await listInsights(props.id))
+  const gmap = guestMap()
+  messages.value = (replay.transcripts || []).map((t) => ({
+    ...t,
+    // replay payload 不含 guest_title，用阵容信息补齐
+    guest_title: gmap[t.guest_id]?.title || '',
+  }))
+  if (replay.insights?.length) {
+    insights.value = replay.insights
+  } else {
+    insights.value = await listInsights(props.id, { final_only: true })
+  }
+}
+
+// 真实 SSE：transcript 事件按 transcript_id 聚合，避免流式 delta 产生碎片消息
+function upsertTranscript(t) {
+  const idx = messages.value.findIndex((m) => m.id === t.transcript_id)
+  const base = {
+    id: t.transcript_id,
+    transcript_id: t.transcript_id,
+    topic_id: t.topic_id,
+    guest_id: t.guest_id,
+    guest_name: t.guest_name,
+    guest_color: t.guest_color,
+    guest_title: guestMap()[t.guest_id]?.title || '',
+    turn_index: t.turn_index,
+    speech_type: t.speech_type,
+    status: t.status,
+    content: '',
+  }
+  if (idx < 0) {
+    messages.value.push(base)
+  }
+  const target = messages.value[idx < 0 ? messages.value.length - 1 : idx]
+  if (t.status === 'streaming') {
+    target.status = 'streaming'
+    target.content += t.delta || ''
+  } else if (t.status === 'done') {
+    target.status = 'done'
+    // done 事件携带服务端最终完整文本，以它为准
+    target.content = t.content || target.content
+  } else if (t.status === 'aborted') {
+    target.status = 'aborted'
+  }
+}
+
+async function refreshFinalState() {
+  // 流结束：以服务端最终状态为准（topic.status=archived + summary + 最终版 insight）
+  try {
+    topic.value = await getTopic(props.id)
+    insights.value = await listInsights(props.id, { final_only: true })
+  } catch (e) {
+    console.error('[refresh final state]', e)
+  }
 }
 
 function startStream() {
   unsubscribe = subscribeStream(props.id, {
     onTranscript: (t) => {
-      messages.value.push(t)
-      setSpeaking(t.guest_id)
+      upsertTranscript(t)
+      if (t.status === 'streaming' || t.status === 'done') {
+        setSpeaking(t.guest_id)
+      }
     },
     onInsight: (ins) => {
-      // create / update / finalize
-      const idx = insights.value.findIndex((i) => i.id === ins.insight_id)
+      // 进行中增量：create/update/finalize 先按 insight_id upsert；
+      // 流结束后会用 final_only 列表整体覆盖，保证只展示最终版
       const item = {
         id: ins.insight_id,
         type: ins.type,
@@ -64,6 +124,7 @@ function startStream() {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }
+      const idx = insights.value.findIndex((i) => i.id === ins.insight_id)
       if (idx >= 0) insights.value[idx] = item
       else insights.value.push(item)
     },
@@ -71,8 +132,11 @@ function startStream() {
     onEnd: () => {
       streamEnded.value = true
       resetGuestStates('idle')
+      refreshFinalState()
     },
     onError: (e) => {
+      // 服务端在 end 后正常关闭连接也会触发 error，此时不算失败
+      if (streamEnded.value) return
       console.error('[stream error]', e)
       error.value = '实时流连接失败'
     },
@@ -87,7 +151,7 @@ async function load() {
 
     if (topic.value.status === 'archived') {
       await loadArchived()
-    } else if (topic.value.status === 'ongoing') {
+    } else if (topic.value.status === 'ongoing' || topic.value.status === 'summarizing') {
       // 已在进行中：拉取已有 insights，再订阅增量
       insightsLoading.value = true
       try {

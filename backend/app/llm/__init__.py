@@ -3,6 +3,7 @@
 from app.llm.client import (
     LLMClient,
     LLMJsonError,
+    LLMUpstreamError,
     get_llm_client,
     shutdown_llm_client,
 )
@@ -10,6 +11,7 @@ from app.llm.client import (
 __all__ = [
     "LLMClient",
     "LLMJsonError",
+    "LLMUpstreamError",
     "get_llm_client",
     "shutdown_llm_client",
 ]

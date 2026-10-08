@@ -25,6 +25,7 @@ PRD §3.3 多 Agent 调度。
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 
@@ -186,6 +187,12 @@ def _transition_topic_status(topic_id: int, new_status: str, summary: str | None
 # 通用发言流式 helper
 # ---------------------------------------------------------------------------
 
+logger = logging.getLogger(__name__)
+
+# 整段发言在"零产出"时的最大尝试次数（LLMClient 内层已对每次请求重试，
+# 这一层兜底供应商持续过载，如 4 次请求全部返回过载错误帧）
+_MAX_SPEECH_ATTEMPTS = 3
+
 
 async def _stream_speech(
     *,
@@ -199,12 +206,38 @@ async def _stream_speech(
     """通用：流式跑一段发言，期间 yield transcript(streaming, delta)。
 
     完成后写库 + yield transcript(done, content)。
-    异常时标记 aborted 并 yield system 错误事件。
+    - 零产出失败（上游过载重试耗尽等）：整段重试，最多 _MAX_SPEECH_ATTEMPTS 次
+    - 已产出部分内容后失败：不重试（避免重复），标记 aborted
+    - CancelledError：标记 aborted 并向上抛（应用关闭）
     """
-    full_text = ""
-    try:
-        async for delta in agent_method():
-            full_text += delta
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_SPEECH_ATTEMPTS + 1):
+        full_text = ""
+        error: Exception | None = None
+        try:
+            async for delta in agent_method():
+                full_text += delta
+                yield make_transcript_event(
+                    topic_id=topic_id,
+                    transcript_id=transcript_id,
+                    guest_id=guest.id,
+                    guest_name=guest.name,
+                    guest_color=guest.color,
+                    turn_index=turn_index,
+                    speech_type=speech_type,
+                    status="streaming",
+                    delta=delta,
+                )
+        except asyncio.CancelledError:
+            _finalize_transcript_row(
+                transcript_id, full_text, status="aborted", reason="client disconnected"
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+
+        if error is None:
+            _finalize_transcript_row(transcript_id, full_text, status="done")
             yield make_transcript_event(
                 topic_id=topic_id,
                 transcript_id=transcript_id,
@@ -213,28 +246,31 @@ async def _stream_speech(
                 guest_color=guest.color,
                 turn_index=turn_index,
                 speech_type=speech_type,
-                status="streaming",
-                delta=delta,
+                status="done",
+                content=full_text,
             )
-    except asyncio.CancelledError:
-        _finalize_transcript_row(transcript_id, full_text, status="aborted", reason="client disconnected")
-        raise
-    except Exception as exc:  # noqa: BLE001
-        _finalize_transcript_row(transcript_id, full_text, status="aborted", reason=str(exc))
-        yield make_system_event(topic_id, f"{speech_type} aborted: {exc}")
-        return
-    _finalize_transcript_row(transcript_id, full_text, status="done")
-    yield make_transcript_event(
-        topic_id=topic_id,
-        transcript_id=transcript_id,
-        guest_id=guest.id,
-        guest_name=guest.name,
-        guest_color=guest.color,
-        turn_index=turn_index,
-        speech_type=speech_type,
-        status="done",
-        content=full_text,
+            return
+
+        last_exc = error
+        logger.warning(
+            "speech failed (transcript=%s attempt=%d/%d produced=%d chars): %s",
+            transcript_id, attempt, _MAX_SPEECH_ATTEMPTS, len(full_text), error,
+        )
+        if full_text:
+            # 已有部分产出，重试会导致内容重复，放弃本段
+            break
+        if attempt < _MAX_SPEECH_ATTEMPTS:
+            yield make_system_event(
+                topic_id,
+                f"{speech_type} 上游暂时不可用，正在重试（第 {attempt} 次）…",
+            )
+            await asyncio.sleep(1.5 * attempt)
+            continue
+
+    _finalize_transcript_row(
+        transcript_id, "", status="aborted", reason=str(last_exc)
     )
+    yield make_system_event(topic_id, f"{speech_type} aborted: {last_exc}")
 
 
 # ---------------------------------------------------------------------------

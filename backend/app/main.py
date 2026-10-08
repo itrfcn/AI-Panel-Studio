@@ -31,7 +31,9 @@ async def lifespan(app: FastAPI):
     yield
     # shutdown
     from app.llm import shutdown_llm_client
+    from app.stream.runner import shutdown_all_sessions
 
+    await shutdown_all_sessions()
     await shutdown_llm_client()
 
 

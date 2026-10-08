@@ -9,12 +9,16 @@ import { listTopics } from '../api/topics'
 const router = useRouter()
 const topics = ref([])
 const loading = ref(false)
+const loadError = ref('')
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await listTopics()
     topics.value = res.items || []
+  } catch (e) {
+    loadError.value = e?.response?.data?.detail || e?.message || '加载讨论列表失败'
   } finally {
     loading.value = false
   }
@@ -37,6 +41,21 @@ onMounted(load)
     <!-- 右侧：欢迎/说明区（独立滚动） -->
     <div class="flex-1 min-w-0 overflow-y-auto p-8">
       <div class="max-w-2xl">
+        <!-- 后端连接失败提示 -->
+        <div
+          v-if="loadError"
+          class="mb-6 rounded-lg border border-red-700 bg-red-900/30 p-4 text-sm text-red-200"
+        >
+          <p class="font-medium mb-1">无法加载讨论列表</p>
+          <p class="text-red-300/80 text-xs mb-2">{{ loadError }}</p>
+          <p class="text-xs text-red-300/60">
+            请确认后端已启动（uvicorn app.main:app --port 8000）且 .env 中 LLM_API_KEY 已配置。
+          </p>
+          <button
+            class="mt-2 text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600 text-white"
+            @click="load"
+          >重试</button>
+        </div>
         <h1 class="text-3xl font-semibold mb-3">AI 圆桌演播厅</h1>
         <p class="text-gray-400 leading-relaxed">
           召集一支虚拟智库，围绕任意议题展开深度碰撞。主持人负责开场、追问与收尾，
