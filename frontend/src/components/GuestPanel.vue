@@ -8,6 +8,7 @@ const props = defineProps({
   state: { type: String, default: 'idle' }, // idle / preparing / speaking
   thought: { type: String, default: '' },
 })
+const emit = defineEmits(['open'])
 
 const stateMeta = {
   idle: { label: '待机', dot: 'bg-gray-400', ring: 'ring-gray-600', icon: '' },
@@ -22,12 +23,14 @@ const isModerator = computed(() => props.guest.role === 'moderator')
 
 <template>
   <div
-    class="rounded-lg border bg-studio-panel p-3 transition"
+    class="rounded-lg border bg-studio-panel p-3 transition cursor-pointer hover:border-gray-500"
     :class="[
       isModerator ? 'border-studio-accent' : 'border-studio-border',
       state === 'speaking' || state === 'hand_raised' ? `ring-2 ${meta.ring}` : '',
     ]"
     :style="{ boxShadow: state === 'speaking' ? `0 0 0 1px ${guest.color}` : undefined }"
+    title="点击查看思考过程"
+    @click="emit('open')"
   >
     <div class="flex items-center gap-3">
       <div
@@ -59,9 +62,9 @@ const isModerator = computed(() => props.guest.role === 'moderator')
     >立场：{{ guest.stance }}</p>
 
     <div
-      v-if="(state === 'preparing' || state === 'hand_raised') && thought"
-      class="mt-2 text-xs rounded px-2 py-1 line-clamp-2"
-      :class="state === 'hand_raised' ? 'text-blue-200/80 bg-blue-900/20' : 'text-yellow-200/80 bg-yellow-900/20'"
+      v-if="thought && state !== 'idle'"
+      class="mt-2 text-xs rounded px-2 py-1 line-clamp-3"
+      :class="state === 'hand_raised' ? 'text-blue-200/80 bg-blue-900/20' : state === 'speaking' ? 'text-green-200/80 bg-green-900/20' : 'text-yellow-200/80 bg-yellow-900/20'"
     >
       💭 {{ thought }}
     </div>

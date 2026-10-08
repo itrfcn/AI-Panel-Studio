@@ -5,7 +5,6 @@ import { ref, watch, nextTick } from 'vue'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
-  summary: { type: String, default: '' },
 })
 
 const scroller = ref(null)
@@ -61,15 +60,7 @@ watch(
         </div>
       </div>
 
-      <div
-        v-if="summary"
-        class="mt-4 rounded-lg border border-studio-accent/50 bg-studio-accent/10 p-4"
-      >
-        <div class="text-xs text-blue-300 mb-1">主持人收尾总结</div>
-        <p class="text-sm text-gray-100 leading-relaxed whitespace-pre-wrap">{{ summary }}</p>
-      </div>
-
-      <p v-if="!messages.length && !summary" class="text-gray-500 text-sm text-center py-8">
+      <p v-if="!messages.length" class="text-gray-500 text-sm text-center py-8">
         等待讨论开始…
       </p>
     </div>

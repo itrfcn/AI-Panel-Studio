@@ -1,9 +1,10 @@
 <script setup>
 // 演播厅视图 — 编排 StudioRoom + SSE 订阅
 // PRD §4.3 演播厅模式 + §6 实时共识/分歧
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import StudioRoom from '../components/StudioRoom.vue'
+import ThoughtModal from '../components/ThoughtModal.vue'
 import { getTopic, startDiscussion } from '../api/topics'
 import { subscribeStream, replayDiscussion } from '../api/stream'
 import { listInsights } from '../api/insights'
@@ -19,7 +20,13 @@ const guestStates = reactive({}) // { [guestId]: { state, thought } }
 const insightsLoading = ref(false)
 const error = ref('')
 const streamEnded = ref(false)
+const thoughtGuestId = ref(null) // 思考过程弹窗当前查看的嘉宾
 let unsubscribe = null
+
+const thoughtGuest = computed(
+  () => topic.value?.guests?.find((g) => g.id === thoughtGuestId.value) || null,
+)
+const thoughtLive = computed(() => guestStates[thoughtGuestId.value] || { state: 'idle', thought: '' })
 
 function resetGuestStates(state = 'idle') {
   if (!topic.value?.guests) return
@@ -214,7 +221,18 @@ onBeforeUnmount(() => {
         :insights="insights"
         :guest-states="guestStates"
         :insights-loading="insightsLoading"
+        @open-thoughts="(gid) => (thoughtGuestId = gid)"
       />
     </div>
+
+    <!-- 思考过程弹窗 -->
+    <ThoughtModal
+      v-if="thoughtGuest"
+      :topic-id="props.id"
+      :guest="thoughtGuest"
+      :live-thought="thoughtLive.thought"
+      :live-state="thoughtLive.state"
+      @close="thoughtGuestId = null"
+    />
   </div>
 </template>

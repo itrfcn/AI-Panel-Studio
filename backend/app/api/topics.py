@@ -199,3 +199,70 @@ def start_discussion(topic_id: int, db: Session = Depends(get_db)) -> TopicDetai
     db.commit()
     db.refresh(topic)
     return TopicDetailOut.model_validate(topic)
+
+
+@router.get("/{topic_id}/guests/{guest_id}/thoughts")
+def get_guest_thoughts(
+    topic_id: int, guest_id: int, db: Session = Depends(get_db)
+) -> dict:
+    """某位嘉宾的公开思考过程时间线。
+
+    数据来源：
+    - EventPoint(event_type=hand_raise).payload 中的 thought/priority（每轮举手思考）
+    - Transcript 中该嘉宾的发言内容（思考对应的实际发言）
+    """
+    _get_topic_or_404(db, topic_id)
+    guest = db.get(Guest, guest_id)
+    if guest is None or guest.topic_id != topic_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Guest {guest_id} not found in topic {topic_id}",
+        )
+
+    from app.models import EventPoint, Transcript
+
+    events = db.execute(
+        select(EventPoint)
+        .where(
+            EventPoint.topic_id == topic_id,
+            EventPoint.guest_id == guest_id,
+            EventPoint.event_type == "hand_raise",
+        )
+        .order_by(EventPoint.turn_index.asc(), EventPoint.id.asc())
+    ).scalars().all()
+
+    # 该嘉宾的所有发言，按 turn_index 索引
+    speeches = db.execute(
+        select(Transcript).where(
+            Transcript.topic_id == topic_id,
+            Transcript.guest_id == guest_id,
+        )
+    ).scalars().all()
+    speech_by_turn = {t.turn_index: t for t in speeches}
+
+    timeline: list[dict] = []
+    for ev in events:
+        import json as _json
+
+        try:
+            payload = _json.loads(ev.payload) if ev.payload else {}
+        except ValueError:
+            payload = {}
+        turn = ev.turn_index
+        transcript = speech_by_turn.get(turn)
+        timeline.append(
+            {
+                "turn_index": turn,
+                "thought": payload.get("thought", ""),
+                "priority": payload.get("priority", ""),
+                "speech_type": transcript.speech_type if transcript else None,
+                "speech": transcript.content if transcript else None,
+                "spoke": transcript is not None,
+                "created_at": ev.created_at,
+            }
+        )
+
+    return {
+        "guest": GuestOut.model_validate(guest).model_dump(mode="json"),
+        "timeline": timeline,
+    }

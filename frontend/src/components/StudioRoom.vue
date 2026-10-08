@@ -18,6 +18,8 @@ const props = defineProps({
 const moderator = computed(() => (props.topic.guests || []).find((g) => g.role === 'moderator'))
 const experts = computed(() => (props.topic.guests || []).filter((g) => g.role === 'expert'))
 
+const emit = defineEmits(['open-thoughts'])
+
 function stateOf(guestId) {
   return props.guestStates[guestId] || { state: 'idle' }
 }
@@ -35,6 +37,7 @@ function stateOf(guestId) {
         :guest="moderator"
         :state="stateOf(moderator.id).state"
         :thought="stateOf(moderator.id).thought"
+        @open="emit('open-thoughts', moderator.id)"
       />
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-3">
         <GuestPanel
@@ -43,13 +46,14 @@ function stateOf(guestId) {
           :guest="g"
           :state="stateOf(g.id).state"
           :thought="stateOf(g.id).thought"
+          @open="emit('open-thoughts', g.id)"
         />
       </div>
     </aside>
 
     <!-- 中：现场 Transcript 独立滚动 -->
     <div class="flex-1 min-w-0 min-h-[300px] lg:min-h-0 rounded-lg border border-studio-border bg-studio-panel overflow-hidden">
-      <Transcript :messages="messages" :summary="topic.summary" />
+      <Transcript :messages="messages" />
     </div>
 
     <!-- 右：共识与分歧区 独立滚动 -->

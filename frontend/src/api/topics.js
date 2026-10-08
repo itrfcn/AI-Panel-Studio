@@ -74,3 +74,11 @@ export async function startDiscussion(id) {
     throw new Error(unwrapError(err))
   }
 }
+
+// GET /api/topics/:id/guests/:gid/thoughts — 某位嘉宾的思考过程时间线
+export async function getGuestThoughts(topicId, guestId) {
+  const { data } = await http.get(
+    `/api/topics/${topicId}/guests/${guestId}/thoughts`,
+  )
+  return data
+}
