@@ -13,6 +13,7 @@ from app.agent.base import AgentContext
 from app.llm import get_llm_client
 from app.llm.prompts import (
     followup_prompt,
+    followup_with_decision_prompt,
     opening_prompt,
     should_continue_prompt,
     summary_prompt,
@@ -54,6 +55,25 @@ class ModeratorAgent:
         client = get_llm_client()
         messages = summary_prompt(ctx.topic_title, ctx.as_text())
         async for delta in client.chat_stream(messages, temperature=0.4, max_tokens=512):
+            yield delta
+
+    async def interject_and_decide(
+        self,
+        ctx: AgentContext,
+        turn_number: int,
+        max_turns: int,
+        stale_round: bool,
+    ) -> AsyncIterator[str]:
+        """流式输出串联追问 + 末尾带 <<CONTINUE:bool|reason>> 决策标记。
+
+        合并了 interject + should_continue 两次 LLM 调用为一次。
+        调用方（orchestrator）从完整文本末尾解析标记并剥离存库。
+        """
+        client = get_llm_client()
+        messages = followup_with_decision_prompt(
+            ctx.topic_title, ctx.as_text(), turn_number, max_turns, stale_round
+        )
+        async for delta in client.chat_stream(messages, temperature=0.5, max_tokens=384):
             yield delta
 
     async def should_continue(

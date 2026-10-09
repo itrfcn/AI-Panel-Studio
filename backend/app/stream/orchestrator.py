@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
@@ -193,6 +195,16 @@ logger = logging.getLogger(__name__)
 # 这一层兜底供应商持续过载，如 4 次请求全部返回过载错误帧）
 _MAX_SPEECH_ATTEMPTS = 3
 
+# <<CONTINUE:true|reason>> / <<CONTINUE:false|reason>>
+_CONTINUE_RE = re.compile(r'<<CONTINUE:(true|false)(?:\|([^>]*))?>>')
+
+
+@dataclass
+class _RoundDecision:
+    """可变容器：从 _run_expert_round 向 run_discussion 传回主持人收尾决策。"""
+    continue_discussion: bool = True
+    reason: str = ""
+
 
 async def _stream_speech(
     *,
@@ -211,6 +223,20 @@ async def _stream_speech(
     - CancelledError：标记 aborted 并向上抛（应用关闭）
     """
     last_exc: Exception | None = None
+
+    # 立即推送空 delta，让前端显示发言人占位（不等 LLM 首 token）
+    yield make_transcript_event(
+        topic_id=topic_id,
+        transcript_id=transcript_id,
+        guest_id=guest.id,
+        guest_name=guest.name,
+        guest_color=guest.color,
+        turn_index=turn_index,
+        speech_type=speech_type,
+        status="streaming",
+        delta="",
+    )
+
     for attempt in range(1, _MAX_SPEECH_ATTEMPTS + 1):
         full_text = ""
         error: Exception | None = None
@@ -274,6 +300,90 @@ async def _stream_speech(
 
 
 # ---------------------------------------------------------------------------
+# 主持人追问 + 决策标记合并流（省一次 LLM 往返）
+# ---------------------------------------------------------------------------
+
+
+async def _stream_followup_and_decide(
+    *,
+    topic_id: int,
+    guest: Guest,
+    turn_index: int,
+    agent_method,
+    round_decision: _RoundDecision,
+) -> AsyncIterator[dict[str, str]]:
+    """流式输出主持人追问 + 从末尾解析 <<CONTINUE:bool|reason>> 决策标记。
+
+    直接流式输出所有 delta（标记会短暂闪现），流结束后解析标记、
+    剥离存库，done 事件用干净文本覆盖。
+    """
+    transcript_id = _create_transcript_row(topic_id, guest.id, turn_index, "followup")
+
+    # 立即推送空 delta，让前端显示主持人占位
+    yield make_transcript_event(
+        topic_id=topic_id,
+        transcript_id=transcript_id,
+        guest_id=guest.id,
+        guest_name=guest.name,
+        guest_color=guest.color,
+        turn_index=turn_index,
+        speech_type="followup",
+        status="streaming",
+        delta="",
+    )
+
+    full_text = ""
+
+    try:
+        async for delta in agent_method():
+            full_text += delta
+            yield make_transcript_event(
+                topic_id=topic_id,
+                transcript_id=transcript_id,
+                guest_id=guest.id,
+                guest_name=guest.name,
+                guest_color=guest.color,
+                turn_index=turn_index,
+                speech_type="followup",
+                status="streaming",
+                delta=delta,
+            )
+    except asyncio.CancelledError:
+        _finalize_transcript_row(transcript_id, full_text, "aborted", "client disconnected")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _finalize_transcript_row(transcript_id, full_text, "aborted", str(exc))
+        yield make_system_event(topic_id, f"followup failed: {exc}")
+        round_decision.continue_discussion = True
+        round_decision.reason = f"error: {exc}"
+        return
+
+    # 解析标记
+    clean_text = full_text
+    m = _CONTINUE_RE.search(full_text)
+    if m:
+        clean_text = full_text[: m.start()].rstrip()
+        round_decision.continue_discussion = m.group(1) == "true"
+        round_decision.reason = m.group(2) or ""
+    else:
+        round_decision.continue_discussion = True
+        round_decision.reason = "no decision marker"
+
+    _finalize_transcript_row(transcript_id, clean_text, "done")
+    yield make_transcript_event(
+        topic_id=topic_id,
+        transcript_id=transcript_id,
+        guest_id=guest.id,
+        guest_name=guest.name,
+        guest_color=guest.color,
+        turn_index=turn_index,
+        speech_type="followup",
+        status="done",
+        content=clean_text,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 主循环
 # ---------------------------------------------------------------------------
 
@@ -287,6 +397,8 @@ async def _run_expert_round(
     pending_extracts: list[asyncio.Task] | None = None,
     mod_agent: ModeratorAgent | None = None,
     moderator: _PseudoGuest | None = None,
+    round_decision: _RoundDecision | None = None,
+    stale_round: bool = False,
 ) -> AsyncIterator[dict[str, str]]:
     """跑一轮专家抢答发言。
 
@@ -325,41 +437,45 @@ async def _run_expert_round(
         phase="expert_decide",
     )
 
-    # 并发决策：每个专家独立 LLM 调用
-    signals_raw = await asyncio.gather(
-        *(agent.decide_raise_hand(ctx, turn_number, max_turns) for agent in agents),
-        return_exceptions=True,
-    )
-    signals: list = []
-    for sig in signals_raw:
-        if isinstance(sig, Exception):
-            continue
-        if sig is not None:
-            signals.append(sig)
-
-    # 把所有举手专家的 thought 通过 state 事件广播（hand_raised 态）
-    # 用户可见"谁举手了"，仲裁后败者回 idle，胜者依次 speaking
-    sig_by_guest_id = {s.guest_id: s for s in signals}
+    # 并发决策：每个专家独立 LLM 调用，逐个返回即推送状态（不等最慢的）
+    task_to_agent: dict[asyncio.Task, ExpertAgent] = {}
     for agent in agents:
-        sig = sig_by_guest_id.get(agent.guest_id)
-        if sig is not None:
-            yield make_state_event(
-                topic_id,
-                agent.guest_id,
-                agent.name,
-                agent.color,
-                "hand_raised",
-                thought=sig.thought,
-            )
-        else:
-            yield make_state_event(
-                topic_id,
-                agent.guest_id,
-                agent.name,
-                agent.color,
-                "idle",
-                thought="",
-            )
+        task = asyncio.create_task(
+            agent.decide_raise_hand(ctx, turn_number, max_turns)
+        )
+        task_to_agent[task] = agent
+
+    signals: list = []
+    pending = set(task_to_agent.keys())
+    while pending:
+        done, pending = await asyncio.wait(
+            pending, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+            agent = task_to_agent[task]
+            try:
+                sig = task.result()
+            except Exception:  # noqa: BLE001
+                sig = None
+            if sig is not None:
+                signals.append(sig)
+                yield make_state_event(
+                    topic_id,
+                    agent.guest_id,
+                    agent.name,
+                    agent.color,
+                    "hand_raised",
+                    thought=sig.thought,
+                )
+            else:
+                yield make_state_event(
+                    topic_id,
+                    agent.guest_id,
+                    agent.name,
+                    agent.color,
+                    "idle",
+                    thought="",
+                )
 
     # 2. 仲裁（所有举手者按优先级排序发言，不人为限制谁该发言）
     arbiter = Arbiter(topic_id)
@@ -455,24 +571,20 @@ async def _run_expert_round(
 
         current_turn = _next_turn_index(topic_id)
 
-    # 3.5 主持人串联/追问（看完本轮发言后引导下一轮方向）
-    if mod_agent is not None and moderator is not None:
+    # 3.5 主持人串联追问 + 是否继续判断（合并为一次流式调用，省一次 LLM 往返）
+    if mod_agent is not None and moderator is not None and round_decision is not None:
         yield make_state_event(
             topic_id, moderator.id, moderator.name, moderator.color, "speaking"
         )
         followup_turn = _next_turn_index(topic_id)
-        followup_id = _create_transcript_row(
-            topic_id, moderator.id, followup_turn, "followup"
-        )
         with SessionLocal() as db:
             interject_ctx = build_context(db, topic_id, topic.title)
-        async for ev in _stream_speech(
+        async for ev in _stream_followup_and_decide(
             topic_id=topic_id,
-            transcript_id=followup_id,
             guest=moderator,
             turn_index=followup_turn,
-            speech_type="followup",
-            agent_method=lambda ma=mod_agent, ic=interject_ctx: ma.interject(ic),
+            agent_method=lambda ma=mod_agent, ic=interject_ctx, tn=turn_number, mt=max_turns, sr=stale_round: ma.interject_and_decide(ic, tn, mt, sr),
+            round_decision=round_decision,
         ):
             yield ev
         yield make_state_event(
@@ -532,6 +644,7 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
     # --- 2. 专家抢答循环 ---
     max_turns = settings.MAX_TURNS
     pending_extracts: list[asyncio.Task] = []
+    prev_new_insights: int | None = None  # 上一轮新洞见数，用于本轮 stale 信号
     for turn_n in range(1, max_turns + 1):
         # 等上一轮抽取完成（如果还在跑），与本轮专家决策并发不冲突
         while pending_extracts:
@@ -555,6 +668,10 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
             db.expunge(fresh)
             topic = fresh
 
+        # 主持人追问 + 决策合并为一次调用（省一次 LLM 往返）
+        round_decision = _RoundDecision()
+        stale = (prev_new_insights == 0) if prev_new_insights is not None else False
+
         async for ev in _run_expert_round(
             topic=topic,
             turn_number=turn_n,
@@ -563,11 +680,12 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
             pending_extracts=pending_extracts,
             mod_agent=mod_agent,
             moderator=moderator,
+            round_decision=round_decision,
+            stale_round=stale,
         ):
             yield ev
 
-        # 等本轮抽取完成并统计新洞见数（作为主持人决策信号；
-        # 本来在下一轮开头/收尾前也要 await，不增加总耗时）
+        # 等本轮抽取完成并统计新洞见数（供下一轮 stale 信号用）
         new_insights = 0
         while pending_extracts:
             task = pending_extracts.pop(0)
@@ -579,24 +697,18 @@ async def run_discussion(topic_id: int) -> AsyncIterator[dict[str, str]]:
             new_insights += len(insight_events)
             for ev in insight_events:
                 yield ev
+        prev_new_insights = new_insights
 
-        # 主持人判断是否继续（至少 2 轮后才允许提前收尾）
+        # 使用合并调用中主持人已给出的决策（至少 2 轮后才允许提前收尾）
         min_turns_before_close = 2
-        if turn_n >= min_turns_before_close and mod_agent is not None:
-            with SessionLocal() as db:
-                decide_ctx = build_context(db, topic_id, topic.title)
-            cont, reason = await mod_agent.should_continue(
-                decide_ctx,
-                turn_number=turn_n,
-                max_turns=max_turns,
-                stale_round=(new_insights == 0),
-            )
+        if turn_n >= min_turns_before_close:
             yield make_system_event(
                 topic_id,
-                f"moderator decide: continue={cont} new_insights={new_insights} ({reason})",
-                phase="decide" if cont else "closing",
+                f"moderator decide: continue={round_decision.continue_discussion} "
+                f"new_insights={new_insights} ({round_decision.reason})",
+                phase="decide" if round_decision.continue_discussion else "closing",
             )
-            if not cont:
+            if not round_decision.continue_discussion:
                 break
 
     # 收尾前等最后一批抽取完成

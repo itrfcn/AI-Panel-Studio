@@ -16,6 +16,7 @@ const statusMeta = {
   ongoing: { label: '进行中', cls: 'bg-green-600 text-green-100 animate-pulse' },
   summarizing: { label: '收尾中', cls: 'bg-blue-600 text-blue-100' },
   archived: { label: '已归档', cls: 'bg-gray-500 text-gray-100' },
+  cancelled: { label: '已中断', cls: 'bg-red-600 text-red-100' },
 }
 
 const sorted = computed(() =>

@@ -13,6 +13,7 @@ const props = defineProps({
   // guestStates: { [guestId]: { state: 'idle'|'preparing'|'speaking', thought?: string } }
   guestStates: { type: Object, default: () => ({}) },
   insightsLoading: { type: Boolean, default: false },
+  phase: { type: String, default: '' },
 })
 
 const moderator = computed(() => (props.topic.guests || []).find((g) => g.role === 'moderator'))
@@ -53,7 +54,7 @@ function stateOf(guestId) {
 
     <!-- 中：现场 Transcript — 移动端固定视口高度内部滚动（流式体验），桌面端撑满独立滚动 -->
     <div class="shrink-0 lg:shrink h-[60vh] lg:h-auto lg:flex-1 min-w-0 rounded-lg border border-studio-border bg-studio-panel overflow-hidden">
-      <Transcript :messages="messages" />
+      <Transcript :messages="messages" :phase="phase" />
     </div>
 
     <!-- 右：共识与分歧区 — 移动端自然高度随页滚动，桌面端撑满独立滚动 -->

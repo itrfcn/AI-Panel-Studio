@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models import Topic
-from app.stream.runner import subscribe as subscribe_run
+from app.stream.runner import cancel_discussion, subscribe as subscribe_run
 
 router = APIRouter(prefix="/topics/{topic_id}/stream", tags=["stream"])
 
@@ -67,6 +67,39 @@ async def stream_discussion(
     return EventSourceResponse(event_generator())
 
 
+@router.post("/cancel")
+async def cancel_discussion_endpoint(topic_id: int, db: Session = Depends(get_db)):
+    """强制中断一场正在运行的讨论。
+
+    取消后台编排任务，并将 topic.status 置为 cancelled（终态）。
+    已取消/已归档的讨论返回 400。
+    """
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.status not in ("ongoing", "summarizing"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot cancel topic in status '{topic.status}' (must be ongoing/summarizing)",
+        )
+
+    cancelled = await cancel_discussion(topic_id)
+
+    # 更新 topic 状态为 cancelled（即使 session 已不存在也标记，防止状态机卡死）
+    from datetime import datetime, timezone
+
+    topic.status = "cancelled"
+    topic.ended_at = datetime.now(timezone.utc).isoformat()
+    topic.updated_at = datetime.now(timezone.utc).isoformat()
+    if not topic.summary:
+        topic.summary = "（讨论已被用户中断）"
+    db.commit()
+
+    return {
+        "topic_id": topic_id,
+        "cancelled": cancelled,
+        "status": topic.status,
+    }
+
+
 @router.get("/replay")
 def replay_discussion(
     topic_id: int,
@@ -83,10 +116,10 @@ def replay_discussion(
     from app.models import Insight
 
     topic = _get_topic_or_404(db, topic_id)
-    if topic.status != "archived":
+    if topic.status not in ("archived", "cancelled"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Replay requires archived topic, got '{topic.status}'",
+            detail=f"Replay requires archived/cancelled topic, got '{topic.status}'",
         )
 
     transcripts = (

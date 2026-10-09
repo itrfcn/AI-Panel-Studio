@@ -6,7 +6,7 @@ import { useRouter } from 'vue-router'
 import StudioRoom from '../components/StudioRoom.vue'
 import ThoughtModal from '../components/ThoughtModal.vue'
 import { getTopic, startDiscussion } from '../api/topics'
-import { subscribeStream, replayDiscussion } from '../api/stream'
+import { subscribeStream, replayDiscussion, cancelDiscussion } from '../api/stream'
 import { listInsights } from '../api/insights'
 
 const props = defineProps({ id: { type: [String, Number], required: true } })
@@ -21,7 +21,34 @@ const insightsLoading = ref(false)
 const error = ref('')
 const streamEnded = ref(false)
 const thoughtGuestId = ref(null) // 思考过程弹窗当前查看的嘉宾
+const currentPhase = ref('') // 后端 system 事件的 phase（expert_decide/extract 等）
+const cancelling = ref(false)
+const showCancelConfirm = ref(false)
 let unsubscribe = null
+
+const canCancel = computed(() =>
+  ['ongoing', 'summarizing'].includes(topic.value?.status) && !streamEnded.value,
+)
+
+function askCancel() {
+  if (!canCancel.value || cancelling.value) return
+  showCancelConfirm.value = true
+}
+
+async function confirmCancel() {
+  showCancelConfirm.value = false
+  cancelling.value = true
+  try {
+    await cancelDiscussion(props.id)
+    if (unsubscribe) unsubscribe()
+    streamEnded.value = true
+    await refreshFinalState()
+  } catch (e) {
+    error.value = e?.response?.data?.detail || e?.message || '中断失败'
+  } finally {
+    cancelling.value = false
+  }
+}
 
 const thoughtGuest = computed(
   () => topic.value?.guests?.find((g) => g.id === thoughtGuestId.value) || null,
@@ -101,6 +128,24 @@ async function refreshFinalState() {
   try {
     topic.value = await getTopic(props.id)
     insights.value = await listInsights(props.id, { final_only: true })
+    // 用 replay 补全可能丢失的 transcript 事件（SSE 传输不保证 100% 可达）
+    const replay = await replayDiscussion(props.id)
+    const gmap = guestMap()
+    for (const t of replay.transcripts || []) {
+      const idx = messages.value.findIndex((m) => m.id === t.id)
+      if (idx < 0) {
+        // SSE 期间丢失的发言，补入
+        messages.value.push({
+          ...t,
+          guest_title: gmap[t.guest_id]?.title || '',
+        })
+      } else if (messages.value[idx].status !== 'done') {
+        // 不完整的条目用服务端最终版本覆盖
+        messages.value[idx].content = t.content
+        messages.value[idx].status = t.status
+      }
+    }
+    messages.value.sort((a, b) => a.turn_index - b.turn_index)
   } catch (e) {
     console.error('[refresh final state]', e)
   }
@@ -109,14 +154,16 @@ async function refreshFinalState() {
 function startStream() {
   unsubscribe = subscribeStream(props.id, {
     onTranscript: (t) => {
+      currentPhase.value = '' // 有人发言，清除等待提示
       upsertTranscript(t)
     },
     onState: (s) => {
+      currentPhase.value = '' // 状态变化，清除等待提示
       // 后端推送的嘉宾状态：idle / hand_raised / preparing / speaking
       setGuestState(s.guest_id, s.state, s.thought || '')
     },
     onInsight: (ins) => {
-      // 进行中增量：create/update/finalize 先按 insight_id upsert；
+      currentPhase.value = '' // 洞见到达，清除等待提示
       // 流结束后会用 final_only 列表整体覆盖，保证只展示最终版
       const item = {
         id: ins.insight_id,
@@ -132,7 +179,10 @@ function startStream() {
       if (idx >= 0) insights.value[idx] = item
       else insights.value.push(item)
     },
-    onSystem: (s) => console.log('[stream]', s),
+    onSystem: (s) => {
+      console.log('[stream]', s)
+      if (s.phase) currentPhase.value = s.phase
+    },
     onEnd: () => {
       streamEnded.value = true
       resetGuestStates('idle')
@@ -200,10 +250,19 @@ onBeforeUnmount(() => {
             'bg-green-600 text-green-100': topic.status === 'ongoing',
             'bg-gray-500 text-gray-100': topic.status === 'archived',
             'bg-yellow-600 text-yellow-100': topic.status === 'summarizing',
+            'bg-red-600 text-red-100': topic.status === 'cancelled',
           }"
         >
-          {{ { ongoing: '进行中', archived: '已归档', summarizing: '收尾中', setup: '待启动' }[topic?.status] || topic?.status }}
+          {{ { ongoing: '进行中', archived: '已归档', summarizing: '收尾中', setup: '待启动', cancelled: '已中断' }[topic?.status] || topic?.status }}
         </span>
+        <button
+          v-if="canCancel"
+          class="text-xs px-2.5 py-1 rounded bg-red-600/80 hover:bg-red-600 text-white disabled:opacity-50"
+          :disabled="cancelling"
+          @click="askCancel"
+        >
+          {{ cancelling ? '中断中…' : '⏹ 中断讨论' }}
+        </button>
         <button class="text-xs text-gray-400 hover:text-white" @click="router.push('/')">← 返回列表</button>
       </div>
     </div>
@@ -221,6 +280,7 @@ onBeforeUnmount(() => {
         :insights="insights"
         :guest-states="guestStates"
         :insights-loading="insightsLoading"
+        :phase="currentPhase"
         @open-thoughts="(gid) => (thoughtGuestId = gid)"
       />
     </div>
@@ -234,5 +294,30 @@ onBeforeUnmount(() => {
       :live-state="thoughtLive.state"
       @close="thoughtGuestId = null"
     />
+
+    <!-- 中断确认弹窗 -->
+    <div v-if="showCancelConfirm" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div class="absolute inset-0 bg-black/60" @click="showCancelConfirm = false"></div>
+      <div class="relative w-full max-w-sm rounded-xl border border-studio-border bg-studio-panel shadow-2xl">
+        <div class="px-5 py-4 border-b border-studio-border">
+          <h3 class="text-base font-semibold">确认中断讨论？</h3>
+        </div>
+        <div class="px-5 py-4 text-sm text-gray-300 leading-relaxed">
+          中断后讨论将立即停止，已有的发言和共识/分歧会保留，该话题状态变为「已中断」，可随时回看。
+        </div>
+        <div class="px-5 py-3 flex justify-end gap-2 border-t border-studio-border">
+          <button
+            class="px-4 py-1.5 rounded text-sm text-gray-300 hover:bg-studio-border disabled:opacity-50"
+            :disabled="cancelling"
+            @click="showCancelConfirm = false"
+          >取消</button>
+          <button
+            class="px-4 py-1.5 rounded text-sm bg-red-600 hover:bg-red-500 text-white disabled:opacity-50"
+            :disabled="cancelling"
+            @click="confirmCancel"
+          >{{ cancelling ? '中断中…' : '确认中断' }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

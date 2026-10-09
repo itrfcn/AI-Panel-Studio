@@ -71,7 +71,7 @@ class ExpertAgent:
             max_turns=max_turns,
         )
         try:
-            raw = await client.chat_json(messages, temperature=0.3, max_tokens=128)
+            raw = await client.chat_json(messages, temperature=0.3, max_tokens=96)
         except LLMJsonError:
             # LLM 返回非 JSON 时保守不举手
             return None

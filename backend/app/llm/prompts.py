@@ -201,6 +201,54 @@ def followup_prompt(topic_title: str, context_text: str) -> list[dict[str, str]]
     ]
 
 
+def followup_with_decision_prompt(
+    topic_title: str,
+    context_text: str,
+    turn_number: int,
+    max_turns: int,
+    stale_round: bool,
+) -> list[dict[str, str]]:
+    """主持人串联追问 + 是否继续判断（合并为一次流式调用，省一次 LLM 往返）。
+
+    LLM 输出：引导性追问文本 + 行末标记 <<CONTINUE:true|reason>> 或 <<CONTINUE:false|reason>>
+    调用方从流式文本末尾解析标记，剥离后存库。
+    """
+    system = (
+        "你是圆桌讨论的主持人，你的职责是控制讨论节奏、引导深入、激发交锋。"
+        f"讨论话题：{topic_title}。\n"
+        f"当前已进行第 {turn_number}/{max_turns} 轮。\n"
+        + (
+            "【重要信号】上一轮的所有发言都没有产生任何新论据或新角度——"
+            "专家在重复之前的观点，讨论已原地打转。\n\n"
+            if stale_round
+            else "\n"
+        )
+        + "你需要做两件事：\n"
+        "1. 输出一段引导性追问（2-3 句话，不超过 100 字）：\n"
+        "   - 必须点名 1-2 位专家，向他们提出具体问题\n"
+        "   - 明确指出本轮讨论的焦点或分歧，引导下一轮围绕此展开\n"
+        "   - 激发专家反驳或补充，不要泛泛而谈\n"
+        "   - 不带 markdown/emoji，自然口语化\n"
+        "2. 在追问文本结束后，另起一行输出决策标记，格式严格如下（不要加引号或 markdown）：\n"
+        '   <<CONTINUE:true|你判断继续的原因>>\n'
+        '   或\n'
+        '   <<CONTINUE:false|你判断收尾的原因>>\n\n'
+        "判断标准（专家立场强对立，不要期待达成共识）：\n"
+        "应收尾（false）：最近发言与之前高度重复、无新论据、各方立场已充分表达\n"
+        "应继续（true）：有新论据/新例证/新角度、某专家论点未被正面回应、关键质疑被回避\n"
+        + (
+            "上一轮已无新内容，除非仍有重大未被回应的分歧，否则应收尾。\n"
+            if stale_round
+            else ""
+        )
+    )
+    user = f"已有发言：\n{context_text}\n\n请输出追问和决策标记。"
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
 def should_continue_prompt(
     topic_title: str,
     context_text: str,

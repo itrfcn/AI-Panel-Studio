@@ -5,6 +5,7 @@ import { ref, watch, nextTick } from 'vue'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
+  phase: { type: String, default: '' },
 })
 
 const scroller = ref(null)
@@ -65,6 +66,20 @@ watch(
       <p v-if="!messages.length" class="text-gray-500 text-sm text-center py-8">
         等待讨论开始…
       </p>
+
+      <!-- 决策期/抽取期等待提示 -->
+      <div v-if="phase === 'expert_decide'" class="flex items-center gap-2.5 text-sm text-gray-400 py-3 px-1">
+        <span class="flex gap-1">
+          <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay: 0ms"></span>
+          <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay: 150ms"></span>
+          <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay: 300ms"></span>
+        </span>
+        <span>专家们正在思考…</span>
+      </div>
+      <div v-else-if="phase === 'extract'" class="flex items-center gap-2.5 text-sm text-gray-400 py-3 px-1">
+        <span class="w-4 h-4 border-2 border-studio-accent border-t-transparent rounded-full animate-spin"></span>
+        <span>正在提取共识与分歧…</span>
+      </div>
       </div>
     </div>
   </section>

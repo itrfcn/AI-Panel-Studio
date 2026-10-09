@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-TopicStatus = Literal["draft", "setup", "ongoing", "summarizing", "archived"]
+TopicStatus = Literal["draft", "setup", "ongoing", "summarizing", "archived", "cancelled"]
 
 
 class TopicCreate(BaseModel):

@@ -87,6 +87,18 @@ function mockReplayStream(topicId, handlers) {
   }
 }
 
+// POST /api/topics/:id/stream/cancel — 强制中断讨论
+export async function cancelDiscussion(topicId) {
+  if (useMock) {
+    const { mockDelay } = await import('./http')
+    await mockDelay()
+    return { topic_id: Number(topicId), cancelled: true, status: 'cancelled' }
+  }
+  const { http } = await import('./http')
+  const { data } = await http.post(`/api/topics/${topicId}/stream/cancel`)
+  return data
+}
+
 // GET /api/topics/:id/stream/replay — 回放 archived 讨论
 export async function replayDiscussion(topicId) {
   if (useMock) {

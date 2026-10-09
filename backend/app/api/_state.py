@@ -15,9 +15,10 @@ from __future__ import annotations
 _TRANSITIONS: dict[str, set[str]] = {
     "draft": {"setup"},
     "setup": {"draft", "ongoing"},
-    "ongoing": {"summarizing"},  # orchestrator 跑完后切 summarizing
-    "summarizing": {"archived", "ongoing"},  # ongoing 容错：重跑收尾
+    "ongoing": {"summarizing", "cancelled"},  # 允许用户强制中断
+    "summarizing": {"archived", "ongoing", "cancelled"},  # 允许用户强制中断
     "archived": set(),  # 终态
+    "cancelled": set(),  # 终态：用户强制中断
 }
 
 
@@ -34,4 +35,4 @@ def validate_transition(current: str, target: str) -> None:
 
 
 def is_terminal(status: str) -> bool:
-    return status == "archived"
+    return status in ("archived", "cancelled")

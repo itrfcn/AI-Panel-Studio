@@ -116,6 +116,24 @@ async def subscribe(topic_id: int) -> AsyncIterator[dict]:
             session.subscribers.discard(queue)
 
 
+async def cancel_discussion(topic_id: int) -> bool:
+    """强制中断一场正在运行的讨论。
+
+    取消后台 pump task（CancelledError 会传播到 orchestrator，
+    其内部已做流式发言的 aborted 收尾），并从 _sessions 注销。
+    返回 True 表示确实取消了一个运行中的 session，False 表示无运行中的讨论。
+    """
+    async with _guard:
+        session = _sessions.get(topic_id)
+        if session is None or session.task is None:
+            return False
+        session.task.cancel()
+        # 不在这里 await task.cancel()：可能阻塞，让 finally 自行清理
+        # 但 pop 掉 session，防止新连接误订阅已取消的任务
+        _sessions.pop(topic_id, None)
+    return True
+
+
 async def shutdown_all_sessions() -> None:
     """应用关闭：取消所有后台讨论任务。"""
     async with _guard:
