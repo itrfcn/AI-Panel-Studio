@@ -159,11 +159,11 @@ erDiagram
 | `id` | INTEGER | PK AUTOINCREMENT | 主键 |
 | `title` | TEXT | NOT NULL | 讨论话题标题（用户输入） |
 | `expert_count` | INTEGER | NOT NULL DEFAULT 4 | 专家人数（2-6，默认 4） |
-| `status` | TEXT | NOT NULL DEFAULT 'draft' | 讨论状态（见枚举 §5.1） |
+| `status` | TEXT | NOT NULL DEFAULT 'draft' | 讨论状态（见枚举 §5.1，含终态 `cancelled`） |
 | `created_at` | TEXT | NOT NULL | 创建时间 ISO8601 |
 | `updated_at` | TEXT | NOT NULL | 更新时间 ISO8601 |
 | `started_at` | TEXT | NULL | 进入演播厅时间（status=ongoing 时写入） |
-| `ended_at` | TEXT | NULL | 收尾完成时间（status=archived 时写入） |
+| `ended_at` | TEXT | NULL | 收尾完成 / 被中断时间（status=archived 或 cancelled 时写入） |
 | `summary` | TEXT | NULL | 主持人收尾总结（自然语言，非 JSON） |
 
 **索引**：
@@ -341,10 +341,14 @@ erDiagram
 stateDiagram-v2
     [*] --> draft: 创建讨论
     draft --> setup: 用户进入准备页
+    setup --> draft: 重新编辑话题
     setup --> ongoing: 阵容确认 启动演播厅
     ongoing --> summarizing: 主持人触发收尾
     summarizing --> archived: 总结完成 归档
+    ongoing --> cancelled: 用户强制中断
+    summarizing --> cancelled: 用户强制中断
     archived --> [*]
+    cancelled --> [*]
 ```
 
 ### 4.2 `transcript.status` 流转
@@ -365,13 +369,16 @@ stateDiagram-v2
 
 ### 5.1 `topic.status`
 
-| 值 | 含义 | 首页可见 |
-|----|------|----------|
-| `draft` | 草稿，话题已输入未生成阵容 | ❌ |
-| `setup` | 准备页，阵容生成中或待确认 | ❌ |
-| `ongoing` | 演播厅进行中 | ✅ |
-| `summarizing` | 主持人收尾中 | ✅ |
-| `archived` | 已归档，可回放 | ✅ |
+| 值 | 含义 | 首页可见 | 终态 |
+|----|------|----------|:----:|
+| `draft` | 草稿，话题已输入未生成阵容 | ❌ | |
+| `setup` | 准备页，阵容生成中或待确认 | ❌ | |
+| `ongoing` | 演播厅进行中 | ✅ | |
+| `summarizing` | 主持人收尾中 | ✅ | |
+| `archived` | 已归档，可回放 | ✅ | ✅ |
+| `cancelled` | 已被用户强制中断，可回放已有内容 | ✅ | ✅ |
+
+> `is_terminal(status)` 对 `archived` 与 `cancelled` 均返回 `True`；`replay` 接口接受这两种状态的讨论。
 
 ### 5.2 `transcript.speech_type`
 
@@ -563,18 +570,24 @@ CREATE INDEX IF NOT EXISTS idx_reasoning_insight ON reasoning_chain(insight_id, 
 
 ## 8. API 契约与 Schema 映射
 
-> 详细 OpenAPI 定义见 `docs/api.md`，本节列主要端点与表映射。
+> 交互式 OpenAPI 文档见后端运行后的 `/docs`（如 <http://localhost:8000/docs>）。端点前缀统一为 `/api`。
 
 | 端点 | 方法 | 读写表 |
 |------|------|--------|
 | `/api/topics` | GET | topic |
 | `/api/topics` | POST | topic |
-| `/api/topics/:id` | GET | topic, guest |
-| `/api/topics/:id/roster/generate` | POST | guest（暂存候选） |
-| `/api/topics/:id/roster/confirm` | POST | topic.status, guest |
-| `/api/topics/:id/stream` | GET (SSE) | transcript, event_point, insight（增量） |
-| `/api/topics/:id/summary` | GET | topic.summary |
-| `/api/topics/:id/replay` | GET | topic, guest, transcript, insight, reasoning_chain |
+| `/api/topics/{id}` | GET | topic, guest |
+| `/api/topics/{id}` | PATCH | topic（状态机校验） |
+| `/api/topics/{id}/start` | POST | topic.status |
+| `/api/topics/{id}/guests/{guest_id}/thoughts` | GET | event_point, transcript |
+| `/api/topics/{id}/roster/generate` | POST | guest（覆盖旧候选） |
+| `/api/topics/{id}/roster` | GET | guest |
+| `/api/topics/{id}/roster/confirm` | POST | topic.status, guest |
+| `/api/topics/{id}/stream` | GET (SSE) | transcript, event_point, insight（增量） |
+| `/api/topics/{id}/stream/cancel` | POST | topic.status（→ `cancelled`）, topic.ended_at |
+| `/api/topics/{id}/stream/replay` | GET | topic, guest, transcript, insight, reasoning_chain |
+| `/api/topics/{id}/insights` | GET | insight |
+| `/api/topics/{id}/insights/{insight_id}` | GET | insight, insight_speech, insight_guest, reasoning_chain |
 
 ---
 
@@ -590,6 +603,7 @@ CREATE INDEX IF NOT EXISTS idx_reasoning_insight ON reasoning_chain(insight_id, 
 | §6.4 关联发言人 | `insight_guest` 多对多关联 |
 | §6.4 推理链路 | `reasoning_chain` 关联 `event_point` |
 | §6.5 最终版标记 | `insight.is_final` 收尾时置 1 |
+| §5.5 强制中断 | `topic.status` 增加终态 `cancelled`，`topic.ended_at` 记录中断时间 |
 
 ---
 
@@ -598,7 +612,8 @@ CREATE INDEX IF NOT EXISTS idx_reasoning_insight ON reasoning_chain(insight_id, 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
 | v1.0 | 2026-10-08 | 基线版：8 张表 + ER 图 + 索引 + 枚举 + DDL |
+| v1.1 | 2026-10-15 | 对齐实现：`topic.status` 增加终态 `cancelled`（含流转图与枚举）；§8 API 映射更新为真实端点（`/api/topics` 系列 + `stream/cancel` + `thoughts`） |
 
 ---
 
-> **下一步**：本文档驱动 DDD 阶段的 API 契约生成（`docs/api.md`）与 OOD 阶段的前端类型定义。样例数据脚本 `scripts/seed.sql` 与 DDL `scripts/schema.sql` 将在实现阶段产出。
+> **文档状态**：本文档描述的数据模型已随 MVP 实现落地，DDL 与索引见 `backend/app/models/`（SQLAlchemy ORM）与 `backend/scripts/init_db.py`。
